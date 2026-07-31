@@ -108,4 +108,9 @@ External-only (no local inference servers) + Compact MaaS:
 
 ## License
 
-See [LICENSE](LICENSE).
+This guide is licensed under the [Apache License 2.0](LICENSE) (same as upstream `rh-aiservices-bu/rhoai-maas-guide`).
+
+Sibling products have their own terms:
+
+- **Compact MaaS** (`rhoai-maas-console` / `compact-maas`) — **AGPL-3.0-only**
+- **litemaas-rhoai** (Option A deploy wrapper) — **AGPL-3.0-only** (upstream LiteMaaS chart keeps its own license)

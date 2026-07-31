@@ -25,3 +25,7 @@ Must contain `scripts/install.sh` and optionally `scripts/wire-maas-models.sh`.
 ## Product path note
 
 Prefer **Phase 10 (Compact MaaS)** for native MaaS UX without LiteLLM. Use LiteMaaS when you need proxy-only features for demos or comparison.
+
+## License
+
+The `litemaas-rhoai` deploy wrapper is **AGPL-3.0-only**; upstream LiteMaaS keeps its own license. See `litemaas-rhoai/README.md`.

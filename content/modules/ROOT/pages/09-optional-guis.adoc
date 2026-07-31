@@ -38,6 +38,8 @@ TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/
 
 *Product path:* prefer Compact MaaS. LiteMaaS remains a side-by-side PoC; this guide does not merge LiteLLM into Compact MaaS.
 
+NOTE: This guide is Apache-2.0. Compact MaaS (`compact-maas` / `rhoai-maas-console`) and the `litemaas-rhoai` deploy wrapper are **AGPL-3.0-only** — see each repo's `LICENSE`/`NOTICE`. Upstream LiteMaaS keeps its own license.
+
 == Prerequisites
 
 * Phases 1–6 complete (gateway `https://maas.<cluster-domain>` healthy).

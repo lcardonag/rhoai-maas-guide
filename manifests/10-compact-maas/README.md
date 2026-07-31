@@ -22,3 +22,7 @@ export MAAS_GATEWAY_URL=https://maas.<cluster-domain>
 ## Coexistence
 
 Safe to install together with Phase 9 (`litemaas`). Compact MaaS never modifies the `litemaas` namespace.
+
+## License
+
+Compact MaaS (`compact-maas` / `rhoai-maas-console`) is **AGPL-3.0-only**. See `rhoai-maas-console/README.md`.
