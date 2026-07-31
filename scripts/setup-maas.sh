@@ -13,7 +13,7 @@
 #   Phase 7: Observability (optional)  - Tempo + OpenTelemetry + COO + Gateway telemetry
 #   Phase 8: External models (optional) - deploy ExternalModel (e.g. OpenAI, Gemini)
 #   Phase 9: LiteMaaS + LiteLLM (optional) - sibling repo litemaas-rhoai
-#   Phase 10: MaaS Console (optional) - thin UI/BFF, no LiteLLM (sibling rhoai-maas-console)
+#   Phase 10: Compact MaaS (optional) - thin UI/BFF, no LiteLLM (sibling compact-maas)
 #
 # Each phase is idempotent  - re-running skips what's already done.
 #
@@ -28,14 +28,16 @@
 #   --with-observability Also run Phase 7 (Tempo + OpenTelemetry + COO + telemetry)
 #   --with-external-models Also run Phase 8 (ExternalModel deployment)
 #   --with-litemaas      Also run Phase 9 (LiteMaaS + LiteLLM GUI PoC)
-#   --with-maas-console  Also run Phase 10 (RHOAI MaaS Console, no LiteLLM)
+#   --with-compact-maas  Also run Phase 10 (Compact MaaS, no LiteLLM)
+#   --with-maas-console  Deprecated alias for --with-compact-maas
 #   --external-model-api-key <key>  API key for external provider (or EXTERNAL_MODEL_API_KEY env var)
 #   --dry-run            Preview without applying
 #   -h, --help           Show this help message
 #
 # Sibling repos (override with env):
 #   LITEMAAS_RHOAI_DIR   default: ../litemaas-rhoai next to this guide
-#   MAAS_CONSOLE_DIR     default: ../rhoai-maas-console next to this guide
+#   COMPACT_MAAS_DIR     default: ../compact-maas, then ../rhoai-maas-console
+#   MAAS_CONSOLE_DIR     Deprecated alias for COMPACT_MAAS_DIR
 #   MAAS_API_KEY         optional: wire LiteLLM backends after LiteMaaS install
 #
 
@@ -67,14 +69,14 @@ SKIP_VERIFY=false
 WITH_OBSERVABILITY=false
 WITH_EXTERNAL_MODELS=false
 WITH_LITEMAAS=false
-WITH_MAAS_CONSOLE=false
+WITH_COMPACT_MAAS=false
 EXTERNAL_MODEL_PROVIDER="${EXTERNAL_MODEL_PROVIDER:-openai}"
 EXTERNAL_MODEL_API_KEY="${EXTERNAL_MODEL_API_KEY:-}"
 DRY_RUN=false
 
 # Sibling GUI repos (absolute paths resolved after GUIDE_DIR is set)
 LITEMAAS_RHOAI_DIR="${LITEMAAS_RHOAI_DIR:-}"
-MAAS_CONSOLE_DIR="${MAAS_CONSOLE_DIR:-}"
+COMPACT_MAAS_DIR="${COMPACT_MAAS_DIR:-${MAAS_CONSOLE_DIR:-}}"
 MAAS_API_KEY="${MAAS_API_KEY:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -86,7 +88,7 @@ while [[ $# -gt 0 ]]; do
         --with-observability) WITH_OBSERVABILITY=true; shift ;;
         --with-external-models) WITH_EXTERNAL_MODELS=true; shift ;;
         --with-litemaas) WITH_LITEMAAS=true; shift ;;
-        --with-maas-console) WITH_MAAS_CONSOLE=true; shift ;;
+        --with-compact-maas|--with-maas-console) WITH_COMPACT_MAAS=true; shift ;;
         --external-model-provider) EXTERNAL_MODEL_PROVIDER="$2"; shift 2 ;;
         --external-model-api-key) EXTERNAL_MODEL_API_KEY="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
@@ -106,7 +108,8 @@ Options:
   --with-observability Also run Phase 7 (Tempo + OpenTelemetry + COO + Gateway telemetry)
   --with-external-models Also run Phase 8 (ExternalModel deployment + test)
   --with-litemaas      Also run Phase 9 (LiteMaaS + LiteLLM PoC GUI)
-  --with-maas-console  Also run Phase 10 (RHOAI MaaS Console — native UX, no LiteLLM)
+  --with-compact-maas  Also run Phase 10 (Compact MaaS — native UX, no LiteLLM)
+  --with-maas-console  Deprecated alias for --with-compact-maas
   --external-model-provider <p>   Provider: openai (default), gemini, bedrock (or set EXTERNAL_MODEL_PROVIDER)
   --external-model-api-key <key>  API key for external provider (or set EXTERNAL_MODEL_API_KEY)
   --dry-run            Preview without applying
@@ -114,7 +117,8 @@ Options:
 
 Environment:
   LITEMAAS_RHOAI_DIR   Path to litemaas-rhoai checkout (default: ../litemaas-rhoai)
-  MAAS_CONSOLE_DIR     Path to rhoai-maas-console checkout (default: ../rhoai-maas-console)
+  COMPACT_MAAS_DIR     Path to compact-maas checkout (default: ../compact-maas, then ../rhoai-maas-console)
+  MAAS_CONSOLE_DIR     Deprecated alias for COMPACT_MAAS_DIR
   MAAS_API_KEY         Optional MaaS gateway API key to wire LiteLLM backends after Phase 9
 
 Phases:
@@ -128,7 +132,7 @@ Phases:
   7  Observability      Tempo + OpenTelemetry + COO + Gateway telemetry (only with --with-observability)
   8  External models    ExternalModel + governance (only with --with-external-models)
   9  LiteMaaS           LiteMaaS + LiteLLM GUI PoC (only with --with-litemaas)
- 10  MaaS Console       Thin native MaaS UI/BFF (only with --with-maas-console)
+ 10  Compact MaaS       Thin native MaaS UI/BFF (only with --with-compact-maas)
 
 Auto-detection (--model auto):
   No GPU             -> simulator (CPU-only, ~30s startup)
@@ -145,12 +149,18 @@ done
 if [ -z "$LITEMAAS_RHOAI_DIR" ]; then
     LITEMAAS_RHOAI_DIR="$(cd "$GUIDE_DIR/../litemaas-rhoai" 2>/dev/null && pwd || echo "$GUIDE_DIR/../litemaas-rhoai")"
 fi
-if [ -z "$MAAS_CONSOLE_DIR" ]; then
-    MAAS_CONSOLE_DIR="$(cd "$GUIDE_DIR/../rhoai-maas-console" 2>/dev/null && pwd || echo "$GUIDE_DIR/../rhoai-maas-console")"
+if [ -z "$COMPACT_MAAS_DIR" ]; then
+    if [ -d "$GUIDE_DIR/../compact-maas" ]; then
+        COMPACT_MAAS_DIR="$(cd "$GUIDE_DIR/../compact-maas" && pwd)"
+    elif [ -d "$GUIDE_DIR/../rhoai-maas-console" ]; then
+        COMPACT_MAAS_DIR="$(cd "$GUIDE_DIR/../rhoai-maas-console" && pwd)"
+    else
+        COMPACT_MAAS_DIR="$GUIDE_DIR/../compact-maas"
+    fi
 fi
 # Normalize to absolute when path exists
 [ -d "$LITEMAAS_RHOAI_DIR" ] && LITEMAAS_RHOAI_DIR="$(cd "$LITEMAAS_RHOAI_DIR" && pwd)"
-[ -d "$MAAS_CONSOLE_DIR" ] && MAAS_CONSOLE_DIR="$(cd "$MAAS_CONSOLE_DIR" && pwd)"
+[ -d "$COMPACT_MAAS_DIR" ] && COMPACT_MAAS_DIR="$(cd "$COMPACT_MAAS_DIR" && pwd)"
 
 require_sibling_repo() {
     local label="$1" dir="$2" script_rel="$3" env_name="$4" clone_hint="$5"
@@ -287,7 +297,7 @@ should_run 6 && [ "$SKIP_VERIFY" = false ] && PHASES_TO_RUN="$PHASES_TO_RUN 6"
 should_run 7 && [ "$WITH_OBSERVABILITY" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 7"
 should_run 8 && [ "$WITH_EXTERNAL_MODELS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 8"
 should_run 9 && [ "$WITH_LITEMAAS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 9"
-should_run 10 && [ "$WITH_MAAS_CONSOLE" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 10"
+should_run 10 && [ "$WITH_COMPACT_MAAS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 10"
 echo ""
 log_info "Phases to run:${PHASES_TO_RUN:- (none)}"
 
@@ -1179,42 +1189,42 @@ if should_run 9 && [ "$WITH_LITEMAAS" = true ]; then
 fi
 
 # =============================================================================
-# Phase 10: RHOAI MaaS Console (Optional)
+# Phase 10: Compact MaaS (Optional)
 # =============================================================================
-if should_run 10 && [ "$WITH_MAAS_CONSOLE" = true ]; then
-    log_phase 10 "RHOAI MaaS Console (native UX, no LiteLLM)"
+if should_run 10 && [ "$WITH_COMPACT_MAAS" = true ]; then
+    log_phase 10 "Compact MaaS (native UX, no LiteLLM)"
 
-    if ! require_sibling_repo "MaaS Console (rhoai-maas-console)" "$MAAS_CONSOLE_DIR" \
-        "scripts/deploy.sh" "MAAS_CONSOLE_DIR" \
-        "https://github.com/lcardonag/rhoai-maas-console (or your local clone)"; then
+    if ! require_sibling_repo "Compact MaaS (compact-maas)" "$COMPACT_MAAS_DIR" \
+        "scripts/deploy.sh" "COMPACT_MAAS_DIR" \
+        "compact-maas (or legacy rhoai-maas-console) next to this guide"; then
         log_error "Aborting Phase 10"
         exit 1
     fi
 
     MAAS_GW_URL="https://maas.${CLUSTER_DOMAIN}"
     log_step "Applying Phase 2 RBAC (maas-admins)..."
-    log_info "Using: $MAAS_CONSOLE_DIR"
+    log_info "Using: $COMPACT_MAAS_DIR"
     if [ "$DRY_RUN" = true ]; then
         log_info "[DRY RUN] Would run apply-phase2-rbac.sh and deploy.sh with MAAS_GATEWAY_URL=$MAAS_GW_URL"
     else
-        if [ -f "$MAAS_CONSOLE_DIR/scripts/apply-phase2-rbac.sh" ]; then
+        if [ -f "$COMPACT_MAAS_DIR/scripts/apply-phase2-rbac.sh" ]; then
             (
-                cd "$MAAS_CONSOLE_DIR"
+                cd "$COMPACT_MAAS_DIR"
                 ./scripts/apply-phase2-rbac.sh
             ) || log_warn "apply-phase2-rbac.sh had warnings — continuing deploy"
         else
             log_warn "apply-phase2-rbac.sh not found — skipping RBAC apply"
         fi
 
-        log_step "Deploying MaaS Console (builds + Helm)..."
+        log_step "Deploying Compact MaaS (builds + Helm)..."
         (
-            cd "$MAAS_CONSOLE_DIR"
+            cd "$COMPACT_MAAS_DIR"
             export MAAS_GATEWAY_URL="$MAAS_GW_URL"
             ./scripts/deploy.sh
         )
 
         if [ -x "$SCRIPT_DIR/verify-guis.sh" ] || [ -f "$SCRIPT_DIR/verify-guis.sh" ]; then
-            "$SCRIPT_DIR/verify-guis.sh" --maas-console || log_warn "MaaS Console soft verify had warnings"
+            "$SCRIPT_DIR/verify-guis.sh" --compact-maas || log_warn "Compact MaaS soft verify had warnings"
         fi
     fi
 fi
@@ -1263,9 +1273,9 @@ else
         LITE_HOST=$(oc get route -n litemaas -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' 2>/dev/null | grep -E '^litemaas\.' | head -1 || true)
         [ -n "$LITE_HOST" ] && log_info "LiteMaaS UI:   https://${LITE_HOST}"
     fi
-    if [ "$WITH_MAAS_CONSOLE" = true ] || oc get ns rhoai-maas-console &>/dev/null; then
-        CONSOLE_HOST=$(oc -n rhoai-maas-console get route rhoai-maas-console -o jsonpath='{.spec.host}' 2>/dev/null || true)
-        [ -n "$CONSOLE_HOST" ] && log_info "MaaS Console:  https://${CONSOLE_HOST}"
+    if [ "$WITH_COMPACT_MAAS" = true ] || oc get ns compact-maas &>/dev/null; then
+        COMPACT_HOST=$(oc -n compact-maas get route compact-maas -o jsonpath='{.spec.host}' 2>/dev/null || true)
+        [ -n "$COMPACT_HOST" ] && log_info "Compact MaaS:  https://${COMPACT_HOST}"
     fi
 
     echo ""
@@ -1275,7 +1285,7 @@ else
     [ "$WITH_OBSERVABILITY" = false ] && log_info "  Add observability:  $0 --from-phase 7 --with-observability"
     [ "$WITH_EXTERNAL_MODELS" = false ] && log_info "  Add external models: $0 --from-phase 8 --with-external-models --external-model-provider openai --external-model-api-key <KEY>"
     [ "$WITH_LITEMAAS" = false ] && log_info "  Add LiteMaaS GUI:    $0 --from-phase 9 --with-litemaas"
-    [ "$WITH_MAAS_CONSOLE" = false ] && log_info "  Add MaaS Console:    $0 --from-phase 10 --with-maas-console"
+    [ "$WITH_COMPACT_MAAS" = false ] && log_info "  Add Compact MaaS:    $0 --from-phase 10 --with-compact-maas"
     log_info "  RHOAI Dashboard:    https://$(oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null || echo '<dashboard-route>')"
 fi
 

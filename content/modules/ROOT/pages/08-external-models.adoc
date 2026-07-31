@@ -13,13 +13,13 @@ IMPORTANT: Companion to the link:https://docs.redhat.com/en/documentation/red_ha
 | Goal | Approach
 
 | New cluster, no GPUs / no local vLLM
-| Phases *1–4* (+ *6* verify API) → Phase *8* external models → optional xref:09-optional-guis.adoc[GUIs] (`--with-maas-console` / `--with-litemaas`). Skip Phase 5 (`--skip-models`).
+| Phases *1–4* (+ *6* verify API) → Phase *8* external models → optional xref:09-optional-guis.adoc[GUIs] (`--with-compact-maas` / `--with-litemaas`). Skip Phase 5 (`--skip-models`).
 
 | OpenAI-compatible SaaS (root `/v1/...`)
 | `ExternalModel.spec.endpoint` = FQDN only (e.g. `api.openai.com`). Leave upstream path empty.
 
 | OpenAI-compatible with *project* base path (IBM RHAI / Inference as a Service)
-| FQDN + *upstream path prefix* (e.g. `/v1/projects/<uuid>/inference`). Prefer *MaaS Console* Admin create (sets rewrite + annotation). YAML recipe below.
+| FQDN + *upstream path prefix* (e.g. `/v1/projects/<uuid>/inference`). Prefer *Compact MaaS* Admin create (sets rewrite + annotation). YAML recipe below.
 
 | Compare proxy UX ($ / virtual keys)
 | Same external models + `--with-litemaas` (wires LiteLLM to gateway).
@@ -49,7 +49,7 @@ Important field meanings:
 | *FQDN only* — no `https://`, no path, no port (e.g. `us-east.rhai.ibm.com`)
 
 | Upstream path prefix
-| Optional. Path only, starts with `/`, *no* trailing slash. Console annotation `rhoai-maas-console/upstream-path-prefix`. HTTPRoute `URLRewrite` target. *Not* ModelRef `endpointOverride`.
+| Optional. Path only, starts with `/`, *no* trailing slash. Compact MaaS annotation `compact-maas/upstream-path-prefix`. HTTPRoute `URLRewrite` target. *Not* ModelRef `endpointOverride`.
 
 | ModelRef `endpointOverride`
 | Optional *MaaS gateway catalog* URL (`https://maas…/llm/<name>`). Do *not* put the IBM project URL here.
@@ -63,26 +63,26 @@ Important field meanings:
 
 == How It Works (five resources)
 
-. *Secret* — provider API key; labels `inference.networking.k8s.io/bbr-managed=true` *and* (RHOAI 3.4) `ipp-managed=true` when using the console path.
+. *Secret* — provider API key; labels `inference.networking.k8s.io/bbr-managed=true` *and* (RHOAI 3.4) `ipp-managed=true` when using the Compact MaaS path.
 . *ExternalModel* — provider, targetModel, endpoint FQDN, credentialRef (+ optional path-prefix annotation).
 . *MaaSModelRef* — catalog entry (must become *Ready*).
 . *MaaSAuthPolicy* — who may call the model on the gateway.
 . *MaaSSubscription* — who may mint API keys + Limitador token windows.
 
-== Path A — MaaS Console Admin (recommended for IBM / RHAI)
+== Path A — Compact MaaS Admin (recommended for IBM / RHAI)
 
-Requires xref:09-optional-guis.adoc[Phase 10] (`--with-maas-console`) and an admin in `maas-admins`.
+Requires xref:09-optional-guis.adoc[Phase 10] (`--with-compact-maas`) and an admin in `maas-admins`.
 
 . Deploy MaaS without local models:
 +
 [source,bash]
 ----
-./scripts/setup-maas.sh --skip-models --with-maas-console
+./scripts/setup-maas.sh --skip-models --with-compact-maas
 # or later:
-./scripts/setup-maas.sh --from-phase 10 --with-maas-console
+./scripts/setup-maas.sh --from-phase 10 --with-compact-maas
 ----
 
-. Open the console → *Admin* → *Model refs* → *Create* → Backend *ExternalModel*.
+. Open Compact MaaS → *Admin* → *Model refs* → *Create* → Backend *ExternalModel*.
 
 . Fill:
 +
@@ -94,7 +94,7 @@ Requires xref:09-optional-guis.adoc[Phase 10] (`--with-maas-console`) and an adm
 | `granite-rhai` (catalog id clients use)
 
 | Namespace
-| `llm` (console default) or `external-models`
+| `llm` (Compact MaaS default) or `external-models`
 
 | Provider
 | `openai`
@@ -132,7 +132,7 @@ curl --http1.1 -sS -w '\nhttp_code=%{http_code}\n' -X POST \
   -d '{"model":"granite-rhai","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ----
 
-TIP: After create, confirm rewrite: `oc get httproute granite-rhai -n llm -o yaml | grep -A6 URLRewrite` and annotation `rhoai-maas-console/upstream-path-prefix` on the ExternalModel.
+TIP: After create, confirm rewrite: `oc get httproute granite-rhai -n llm -o yaml | grep -A6 URLRewrite` and annotation `compact-maas/upstream-path-prefix` on the ExternalModel.
 
 == Path B — YAML / oc (guide manifests + custom OpenAI-compatible)
 
@@ -189,7 +189,7 @@ oc label secret my-saas-api-key -n external-models \
   inference.networking.k8s.io/ipp-managed=true --overwrite
 ----
 
-Then apply matching `MaaSModelRef`, `MaaSAuthPolicy`, and `MaaSSubscription` (see OpenAI `maas/` examples). After the HTTPRoute appears, ensure URLRewrite strips `/llm/<name>` → `/` (console heals this; for pure `oc`, patch as in <<urlrewrite>>).
+Then apply matching `MaaSModelRef`, `MaaSAuthPolicy`, and `MaaSSubscription` (see OpenAI `maas/` examples). After the HTTPRoute appears, ensure URLRewrite strips `/llm/<name>` → `/` (Compact MaaS heals this; for pure `oc`, patch as in <<urlrewrite>>).
 
 === IBM RHAI / path-prefixed OpenAI-compatible (YAML)
 
@@ -197,7 +197,7 @@ Platform `ExternalModel.spec.endpoint` cannot store a path. Use:
 
 . FQDN in `spec.endpoint`
 . Annotation for the project base path
-. HTTPRoute `URLRewrite` `ReplacePrefixMatch` = that path (console does this; YAML operators must patch the route)
+. HTTPRoute `URLRewrite` `ReplacePrefixMatch` = that path (Compact MaaS does this; YAML operators must patch the route)
 
 Templates: `manifests/08-external-models/openai-compatible-prefixed/` (placeholders).
 
@@ -209,8 +209,8 @@ metadata:
   name: granite-rhai
   namespace: llm   # or external-models — match ModelRef ns
   annotations:
-    # Consumed by RHOAI MaaS Console BFF for test-connection + URLRewrite heal
-    rhoai-maas-console/upstream-path-prefix: "/v1/projects/REPLACE-PROJECT-UUID/inference"
+    # Consumed by Compact MaaS BFF for test-connection + URLRewrite heal
+    compact-maas/upstream-path-prefix: "/v1/projects/REPLACE-PROJECT-UUID/inference"
 spec:
   provider: openai
   targetModel: REPLACE-TARGET-MODEL-ID
@@ -241,8 +241,8 @@ After ModelRef is Ready and HTTPRoute exists:
 [source,bash]
 ----
 # Example: rewrite /llm/granite-rhai → /v1/projects/<uuid>/inference
-# Prefer console Admin create (auto). Manual patch shape depends on HTTPRoute filters;
-# see console docs admin/subscriptions-and-enrollment.md (ExternalModel Chat 404 section).
+# Prefer Compact MaaS Admin create (auto). Manual patch shape depends on HTTPRoute filters;
+# see compact-maas docs admin/subscriptions-and-enrollment.md (ExternalModel Chat 404 section).
 oc get httproute granite-rhai -n llm -o yaml
 ----
 
@@ -329,9 +329,9 @@ curl --http1.1 -sk "${MAAS_GW}/external-models/gpt-4o-mini/v1/chat/completions" 
     -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Say hello in 3 words."}], "max_tokens": 20}'
 ----
 
-Catalog models created via console in `llm` use `/llm/<name>/v1/...` (same auth).
+Catalog models created via Compact MaaS in `llm` use `/llm/<name>/v1/...` (same auth).
 
-WARNING: Platform BBR EnvoyFilter match bugs can cause 404/401 — see <<known-issues>>. Console deploys a durable BBR anchor EnvoyFilter when you use `--with-maas-console`.
+WARNING: Platform BBR EnvoyFilter match bugs can cause 404/401 — see <<known-issues>>. Compact MaaS deploys a durable BBR anchor EnvoyFilter when you use `--with-compact-maas`.
 
 == Automated Setup
 
@@ -372,7 +372,7 @@ Manifests: `manifests/08-external-models/bedrock/`. Use Mantle host `bedrock-man
 
 === ext-proc filter not inserted (RHOAIENG-68594)
 
-`payload-processing` EnvoyFilter may not attach; no credential injection / path rewrite → 401/404. Console `--with-maas-console` applies `scripts/fix-payload-processing-envoyfilter.sh` (durable anchor). Re-apply after MaaS/RHCL upgrades.
+`payload-processing` EnvoyFilter may not attach; no credential injection / path rewrite → 401/404. Compact MaaS `--with-compact-maas` applies `scripts/fix-payload-processing-envoyfilter.sh` (durable anchor). Re-apply after MaaS/RHCL upgrades.
 
 === Gemini path incompatibility (RHOAIENG-68592)
 
@@ -380,7 +380,7 @@ See <<google-gemini>>.
 
 === Wrong field for IBM project URL
 
-Putting `https://…/v1/projects/…/inference/` in *Endpoint override* does nothing for upstream routing. Use FQDN + *Upstream path prefix* (console) or the annotation + URLRewrite (YAML).
+Putting `https://…/v1/projects/…/inference/` in *Endpoint override* does nothing for upstream routing. Use FQDN + *Upstream path prefix* (Compact MaaS) or the annotation + URLRewrite (YAML).
 
 == Appendix
 
@@ -403,10 +403,10 @@ manifests/08-external-models/
 == References
 
 * link:https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index#maas-external-model_maas-deploy[RHOAI ExternalModel documentation]
-* RHOAI MaaS Console operator notes: `rhoai-maas-console/docs/admin/subscriptions-and-enrollment.md` (ExternalModel + path prefix)
+* Compact MaaS operator notes: `compact-maas/docs/admin/subscriptions-and-enrollment.md` (ExternalModel + path prefix)
 * link:https://github.com/opendatahub-io/ai-gateway-payload-processing[BBR repository]
 
 == Next steps
 
-* xref:09-optional-guis.adoc[Optional GUIs] — Console and/or LiteMaaS without local inference
+* xref:09-optional-guis.adoc[Optional GUIs] — Compact MaaS and/or LiteMaaS without local inference
 * xref:08-architecture.adoc[Architecture & Request Flow]

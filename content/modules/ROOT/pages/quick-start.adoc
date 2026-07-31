@@ -45,8 +45,8 @@ This runs Phases 0-6 automatically. The script detects what's already installed 
 | Also run Phase 9 (LiteMaaS + LiteLLM PoC; sibling `litemaas-rhoai`)
 |
 
-| `--with-maas-console`
-| Also run Phase 10 (RHOAI MaaS Console; sibling `rhoai-maas-console`)
+| `--with-compact-maas`
+| Also run Phase 10 (Compact MaaS; sibling `compact-maas`)
 |
 
 | `--dry-run`
@@ -97,7 +97,7 @@ This runs Phases 0-6 automatically. The script detects what's already installed 
 | 5-15 min
 
 | 10
-| MaaS Console (optional) - thin native UI into `rhoai-maas-console`
+| Compact MaaS (optional) - thin native UI into `compact-maas`
 | 5-15 min
 |===
 
@@ -123,10 +123,10 @@ For a fresh cluster with no MaaS components:
 
 [source,bash]
 ----
-./scripts/setup-maas.sh --with-maas-console
+./scripts/setup-maas.sh --with-compact-maas
 ./scripts/setup-maas.sh --with-litemaas
 # Or both:
-./scripts/setup-maas.sh --with-maas-console --with-litemaas
+./scripts/setup-maas.sh --with-compact-maas --with-litemaas
 ----
 
 See xref:09-optional-guis.adoc[Optional GUIs] for sibling repo paths and when to choose each.
@@ -135,10 +135,10 @@ See xref:09-optional-guis.adoc[Optional GUIs] for sibling repo paths and when to
 
 [source,bash]
 ----
-./scripts/setup-maas.sh --skip-models --with-maas-console
+./scripts/setup-maas.sh --skip-models --with-compact-maas
 ----
 
-Then register OpenAI-compatible SaaS or IBM RHAI models per xref:08-external-models.adoc[Phase 8: External Models] (console Admin *Upstream path prefix*, or YAML templates under `manifests/08-external-models/openai-compatible-prefixed/`).
+Then register OpenAI-compatible SaaS or IBM RHAI models per xref:08-external-models.adoc[Phase 8: External Models] (Compact MaaS Admin *Upstream path prefix*, or YAML templates under `manifests/08-external-models/openai-compatible-prefixed/`).
 
 === Resume from a specific phase
 

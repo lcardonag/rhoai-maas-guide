@@ -6,7 +6,7 @@ Templates for external models whose OpenAI routes live under a **project base pa
 https://us-east.rhai.ibm.com/v1/projects/<uuid>/inference/v1/chat/completions
 ```
 
-Replace placeholders before apply. Prefer **MaaS Console → Admin → Model refs → ExternalModel** (Test connection + automatic URLRewrite). These YAMLs are for GitOps / `oc` operators.
+Replace placeholders before apply. Prefer **Compact MaaS → Admin → Model refs → ExternalModel** (Test connection + automatic URLRewrite). These YAMLs are for GitOps / `oc` operators.
 
 ## Placeholders
 
@@ -29,7 +29,7 @@ sed -e 's/REPLACE-PROJECT-UUID/…/' -e 's/REPLACE-TARGET-MODEL-ID/…/' \
 oc apply -f maas-modelref.yaml
 oc apply -f maas-auth-policy.yaml
 oc apply -f maas-subscription.yaml
-# Then heal HTTPRoute URLRewrite to /v1/projects/<uuid>/inference (console does this)
+# Then heal HTTPRoute URLRewrite to /v1/projects/<uuid>/inference (Compact MaaS does this)
 ```
 
 See Antora page **Phase 8: External Models** (`08-external-models.adoc`).

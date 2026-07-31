@@ -5,8 +5,8 @@ metadata:
   namespace: llm
   annotations:
     # Path only — no scheme/host, no trailing slash.
-    # Console BFF uses this for test-connection + HTTPRoute URLRewrite heal.
-    rhoai-maas-console/upstream-path-prefix: "/v1/projects/REPLACE-PROJECT-UUID/inference"
+    # Consumed by Compact MaaS BFF for test-connection + HTTPRoute URLRewrite heal.
+    compact-maas/upstream-path-prefix: "/v1/projects/REPLACE-PROJECT-UUID/inference"
 spec:
   provider: openai
   targetModel: REPLACE-TARGET-MODEL-ID

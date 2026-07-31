@@ -9,7 +9,7 @@ This guide does **not** vendor LiteMaaS charts. Orchestration calls a sibling ch
 ./scripts/setup-maas.sh --from-phase 9 --with-litemaas
 
 # Optional: wire LiteLLM backends to the MaaS gateway
-export MAAS_API_KEY=sk-oai-...   # mint via MaaS / console
+export MAAS_API_KEY=sk-oai-...   # mint via MaaS / Compact MaaS
 ./scripts/setup-maas.sh --from-phase 9 --with-litemaas
 # (wire runs automatically when MAAS_API_KEY is set)
 ```
@@ -24,4 +24,4 @@ Must contain `scripts/install.sh` and optionally `scripts/wire-maas-models.sh`.
 
 ## Product path note
 
-Prefer **Phase 10 (MaaS Console)** for native MaaS UX without LiteLLM. Use LiteMaaS when you need proxy-only features for demos or comparison.
+Prefer **Phase 10 (Compact MaaS)** for native MaaS UX without LiteLLM. Use LiteMaaS when you need proxy-only features for demos or comparison.

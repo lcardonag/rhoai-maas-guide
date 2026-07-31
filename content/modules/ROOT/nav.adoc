@@ -18,7 +18,7 @@
 * xref:08-external-models.adoc[Phase 8: External Models]
 
 .Optional GUIs
-* xref:09-optional-guis.adoc[Phases 9–10: LiteMaaS and MaaS Console]
+* xref:09-optional-guis.adoc[Phases 9–10: LiteMaaS and Compact MaaS]
 
 .Reference
 * xref:08-architecture.adoc[Architecture & Request Flow]

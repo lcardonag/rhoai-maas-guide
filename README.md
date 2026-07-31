@@ -45,16 +45,16 @@ Each phase has step-by-step instructions, status gates, and troubleshooting.
 | Phase | Description | Flag |
 |-------|-------------|------|
 | 9. LiteMaaS + LiteLLM | PoC GUI with LiteLLM proxy (`litemaas` ns) | `--with-litemaas` |
-| 10. MaaS Console | Thin native MaaS UI/BFF, **no LiteLLM** (`rhoai-maas-console` ns) | `--with-maas-console` |
+| 10. Compact MaaS | Thin native MaaS UI/BFF, **no LiteLLM** (`compact-maas` ns) | `--with-compact-maas` |
 
-Both GUIs are independent and can coexist. **Recommended product path:** MaaS Console. LiteMaaS is for PoC / proxy features ($ budgets, virtual keys). See [Optional GUIs](content/modules/ROOT/pages/09-optional-guis.adoc).
+Both GUIs are independent and can coexist. **Recommended product path:** Compact MaaS. LiteMaaS is for PoC / proxy features ($ budgets, virtual keys). See [Optional GUIs](content/modules/ROOT/pages/09-optional-guis.adoc).
 
 Sibling checkouts (or set env):
 
 | Env | Default |
 |-----|---------|
 | `LITEMAAS_RHOAI_DIR` | `../litemaas-rhoai` |
-| `MAAS_CONSOLE_DIR` | `../rhoai-maas-console` |
+| `COMPACT_MAAS_DIR` | `../compact-maas` (falls back to `../rhoai-maas-console`) |
 
 ## Automated Setup
 
@@ -79,15 +79,15 @@ With observability (Cluster Observability Operator + Gateway telemetry):
 Optional GUIs (after MaaS is up, or in the same run):
 
 ```bash
-./scripts/setup-maas.sh --with-maas-console
+./scripts/setup-maas.sh --with-compact-maas
 ./scripts/setup-maas.sh --with-litemaas
-./scripts/setup-maas.sh --with-maas-console --with-litemaas
+./scripts/setup-maas.sh --with-compact-maas --with-litemaas
 ```
 
-External-only (no local inference servers) + Console:
+External-only (no local inference servers) + Compact MaaS:
 
 ```bash
-./scripts/setup-maas.sh --skip-models --with-maas-console
+./scripts/setup-maas.sh --skip-models --with-compact-maas
 # Then add OpenAI / IBM RHAI ExternalModels — see Phase 8 docs
 ```
 

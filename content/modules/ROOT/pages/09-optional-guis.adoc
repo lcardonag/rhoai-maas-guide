@@ -1,22 +1,22 @@
-= Phase 9–10: Optional GUIs (LiteMaaS and MaaS Console)
+= Phase 9–10: Optional GUIs (LiteMaaS and Compact MaaS)
 
 After native RHOAI MaaS is up (phases 1–4 minimum; *local models optional*), you can optionally install one or both GUIs.
 They live in **separate namespaces** and can coexist.
 
-TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/setup-maas.sh --skip-models` then xref:08-external-models.adoc[Phase 8] (OpenAI-compatible SaaS, including IBM RHAI path prefixes), then `--with-maas-console` and/or `--with-litemaas`.
+TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/setup-maas.sh --skip-models` then xref:08-external-models.adoc[Phase 8] (OpenAI-compatible SaaS, including IBM RHAI path prefixes), then `--with-compact-maas` and/or `--with-litemaas`.
 
 == Which GUI should I use?
 
 [cols="1,2,2"]
 |===
-| | *RHOAI MaaS Console (recommended product path)* | *LiteMaaS + LiteLLM (PoC)*
+| | *Compact MaaS (recommended product path)* | *LiteMaaS + LiteLLM (PoC)*
 
 | Flag
-| `--with-maas-console`
+| `--with-compact-maas`
 | `--with-litemaas`
 
 | Namespace
-| `rhoai-maas-console`
+| `compact-maas`
 | `litemaas`
 
 | Architecture
@@ -32,11 +32,11 @@ TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/
 | Comparing LiteMaaS UX; $ budgets / virtual keys / single base URL
 
 | Sibling repo
-| `rhoai-maas-console` (`MAAS_CONSOLE_DIR`)
+| `compact-maas` (`COMPACT_MAAS_DIR`; falls back to `rhoai-maas-console`)
 | `litemaas-rhoai` (`LITEMAAS_RHOAI_DIR`)
 |===
 
-*Product path:* prefer the MaaS Console. LiteMaaS remains a side-by-side PoC; this guide does not merge LiteLLM into the console.
+*Product path:* prefer Compact MaaS. LiteMaaS remains a side-by-side PoC; this guide does not merge LiteLLM into Compact MaaS.
 
 == Prerequisites
 
@@ -49,17 +49,17 @@ TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/
 
 [source,bash]
 ----
-# MaaS + thin console (no LiteLLM)
-./scripts/setup-maas.sh --with-maas-console
+# MaaS + Compact MaaS (no LiteLLM)
+./scripts/setup-maas.sh --with-compact-maas
 
 # MaaS + LiteMaaS/LiteLLM PoC
 ./scripts/setup-maas.sh --with-litemaas
 
 # Both GUIs
-./scripts/setup-maas.sh --with-maas-console --with-litemaas
+./scripts/setup-maas.sh --with-compact-maas --with-litemaas
 
 # Resume GUI-only after core is done
-./scripts/setup-maas.sh --from-phase 10 --with-maas-console
+./scripts/setup-maas.sh --from-phase 10 --with-compact-maas
 ./scripts/setup-maas.sh --from-phase 9 --with-litemaas
 ----
 
@@ -69,8 +69,11 @@ TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/
 |===
 | Variable | Meaning
 
+| `COMPACT_MAAS_DIR`
+| Path to `compact-maas` (default `../compact-maas`, then `../rhoai-maas-console`)
+
 | `MAAS_CONSOLE_DIR`
-| Path to `rhoai-maas-console` (default `../rhoai-maas-console`)
+| Deprecated alias for `COMPACT_MAAS_DIR`
 
 | `LITEMAAS_RHOAI_DIR`
 | Path to `litemaas-rhoai` (default `../litemaas-rhoai`)
@@ -79,7 +82,7 @@ TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/
 | Optional. When set during Phase 9, runs `wire-maas-models.sh --discover-cluster --all`
 
 | `MAAS_GATEWAY_URL`
-| Set automatically by Phase 10 for console Helm (`https://maas.<domain>`)
+| Set automatically by Phase 10 for Compact MaaS Helm (`https://maas.<domain>`)
 |===
 
 == What each phase runs
@@ -92,20 +95,20 @@ TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/
 
 See `manifests/09-litemaas/README.md`.
 
-=== Phase 10 — MaaS Console
+=== Phase 10 — Compact MaaS
 
-. Runs `$MAAS_CONSOLE_DIR/scripts/apply-phase2-rbac.sh` (maas-admins) when present.
-. Runs `$MAAS_CONSOLE_DIR/scripts/deploy.sh` with `MAAS_GATEWAY_URL=https://maas.<domain>`.
-. Soft-verifies via `./scripts/verify-guis.sh --maas-console`.
+. Runs `$COMPACT_MAAS_DIR/scripts/apply-phase2-rbac.sh` (maas-admins) when present.
+. Runs `$COMPACT_MAAS_DIR/scripts/deploy.sh` with `MAAS_GATEWAY_URL=https://maas.<domain>`.
+. Soft-verifies via `./scripts/verify-guis.sh --compact-maas`.
 
-See `manifests/10-maas-console/README.md`.
+See `manifests/10-compact-maas/README.md`.
 
 == Manual verify
 
 [source,bash]
 ----
 ./scripts/verify-guis.sh
-./scripts/verify-guis.sh --maas-console
+./scripts/verify-guis.sh --compact-maas
 ./scripts/verify-guis.sh --litemaas
 ----
 
