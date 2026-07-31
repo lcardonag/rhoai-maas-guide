@@ -32,12 +32,29 @@ Each phase has step-by-step instructions, status gates, and troubleshooting.
 |-------|-------------|------|
 | [5. Model Deployment](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/05-maas-models.html) | Deploy and register LLM models with MaaS | 1-15 min |
 | [6. Verification](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/06-verification.html) | End-to-end checks (API keys, inference, rate limiting) | 5 min |
+| [8. External Models](content/modules/ROOT/pages/08-external-models.adoc) *(optional)* | OpenAI-compatible SaaS / IBM RHAI — **no local inference** | 5-15 min |
 
 ### Observability
 
 | Phase | Description | Time |
 |-------|-------------|------|
 | [7. Observability](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/07-observability.html) *(optional)* | COO subscription + Gateway telemetry dashboards | 5 min |
+
+### Optional GUIs
+
+| Phase | Description | Flag |
+|-------|-------------|------|
+| 9. LiteMaaS + LiteLLM | PoC GUI with LiteLLM proxy (`litemaas` ns) | `--with-litemaas` |
+| 10. MaaS Console | Thin native MaaS UI/BFF, **no LiteLLM** (`rhoai-maas-console` ns) | `--with-maas-console` |
+
+Both GUIs are independent and can coexist. **Recommended product path:** MaaS Console. LiteMaaS is for PoC / proxy features ($ budgets, virtual keys). See [Optional GUIs](content/modules/ROOT/pages/09-optional-guis.adoc).
+
+Sibling checkouts (or set env):
+
+| Env | Default |
+|-----|---------|
+| `LITEMAAS_RHOAI_DIR` | `../litemaas-rhoai` |
+| `MAAS_CONSOLE_DIR` | `../rhoai-maas-console` |
 
 ## Automated Setup
 
@@ -59,6 +76,21 @@ With observability (Cluster Observability Operator + Gateway telemetry):
 ./scripts/setup-maas.sh --with-observability
 ```
 
+Optional GUIs (after MaaS is up, or in the same run):
+
+```bash
+./scripts/setup-maas.sh --with-maas-console
+./scripts/setup-maas.sh --with-litemaas
+./scripts/setup-maas.sh --with-maas-console --with-litemaas
+```
+
+External-only (no local inference servers) + Console:
+
+```bash
+./scripts/setup-maas.sh --skip-models --with-maas-console
+# Then add OpenAI / IBM RHAI ExternalModels — see Phase 8 docs
+```
+
 ## Available Models
 
 | Model | GPU Required | VRAM | Use Case |
@@ -72,6 +104,7 @@ With observability (Cluster Observability Operator + Gateway telemetry):
 - [RHOAI 3.4 MaaS Official Docs](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index)
 - [Upstream MaaS Documentation](https://opendatahub-io.github.io/models-as-a-service/latest/)
 - [Upstream MaaS Architecture](https://opendatahub-io.github.io/models-as-a-service/latest/concepts/architecture/)
+- Optional GUIs: [content/modules/ROOT/pages/09-optional-guis.adoc](content/modules/ROOT/pages/09-optional-guis.adoc)
 
 ## License
 

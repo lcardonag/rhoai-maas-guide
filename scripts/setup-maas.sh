@@ -12,6 +12,8 @@
 #   Phase 6: Verify  - run 6-phase E2E verification
 #   Phase 7: Observability (optional)  - Tempo + OpenTelemetry + COO + Gateway telemetry
 #   Phase 8: External models (optional) - deploy ExternalModel (e.g. OpenAI, Gemini)
+#   Phase 9: LiteMaaS + LiteLLM (optional) - sibling repo litemaas-rhoai
+#   Phase 10: MaaS Console (optional) - thin UI/BFF, no LiteLLM (sibling rhoai-maas-console)
 #
 # Each phase is idempotent  - re-running skips what's already done.
 #
@@ -25,9 +27,16 @@
 #   --skip-verify        Skip Phase 6 (verification)
 #   --with-observability Also run Phase 7 (Tempo + OpenTelemetry + COO + telemetry)
 #   --with-external-models Also run Phase 8 (ExternalModel deployment)
+#   --with-litemaas      Also run Phase 9 (LiteMaaS + LiteLLM GUI PoC)
+#   --with-maas-console  Also run Phase 10 (RHOAI MaaS Console, no LiteLLM)
 #   --external-model-api-key <key>  API key for external provider (or EXTERNAL_MODEL_API_KEY env var)
 #   --dry-run            Preview without applying
 #   -h, --help           Show this help message
+#
+# Sibling repos (override with env):
+#   LITEMAAS_RHOAI_DIR   default: ../litemaas-rhoai next to this guide
+#   MAAS_CONSOLE_DIR     default: ../rhoai-maas-console next to this guide
+#   MAAS_API_KEY         optional: wire LiteLLM backends after LiteMaaS install
 #
 
 set -euo pipefail
@@ -57,9 +66,16 @@ SKIP_MODELS=false
 SKIP_VERIFY=false
 WITH_OBSERVABILITY=false
 WITH_EXTERNAL_MODELS=false
+WITH_LITEMAAS=false
+WITH_MAAS_CONSOLE=false
 EXTERNAL_MODEL_PROVIDER="${EXTERNAL_MODEL_PROVIDER:-openai}"
 EXTERNAL_MODEL_API_KEY="${EXTERNAL_MODEL_API_KEY:-}"
 DRY_RUN=false
+
+# Sibling GUI repos (absolute paths resolved after GUIDE_DIR is set)
+LITEMAAS_RHOAI_DIR="${LITEMAAS_RHOAI_DIR:-}"
+MAAS_CONSOLE_DIR="${MAAS_CONSOLE_DIR:-}"
+MAAS_API_KEY="${MAAS_API_KEY:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -69,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --skip-verify) SKIP_VERIFY=true; shift ;;
         --with-observability) WITH_OBSERVABILITY=true; shift ;;
         --with-external-models) WITH_EXTERNAL_MODELS=true; shift ;;
+        --with-litemaas) WITH_LITEMAAS=true; shift ;;
+        --with-maas-console) WITH_MAAS_CONSOLE=true; shift ;;
         --external-model-provider) EXTERNAL_MODEL_PROVIDER="$2"; shift 2 ;;
         --external-model-api-key) EXTERNAL_MODEL_API_KEY="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
@@ -82,15 +100,22 @@ idempotent  - re-running skips what's already done.
 
 Options:
   --model <name>       Model: simulator, granite-tiny-gpu, gpt-oss-20b, auto (default: auto)
-  --from-phase <N>     Start from phase N (0-8, default: 0)
+  --from-phase <N>     Start from phase N (0-10, default: 0)
   --skip-models        Skip Phase 5 (model deployment)
   --skip-verify        Skip Phase 6 (verification)
   --with-observability Also run Phase 7 (Tempo + OpenTelemetry + COO + Gateway telemetry)
   --with-external-models Also run Phase 8 (ExternalModel deployment + test)
+  --with-litemaas      Also run Phase 9 (LiteMaaS + LiteLLM PoC GUI)
+  --with-maas-console  Also run Phase 10 (RHOAI MaaS Console — native UX, no LiteLLM)
   --external-model-provider <p>   Provider: openai (default), gemini, bedrock (or set EXTERNAL_MODEL_PROVIDER)
   --external-model-api-key <key>  API key for external provider (or set EXTERNAL_MODEL_API_KEY)
   --dry-run            Preview without applying
   -h, --help           Show this help message
+
+Environment:
+  LITEMAAS_RHOAI_DIR   Path to litemaas-rhoai checkout (default: ../litemaas-rhoai)
+  MAAS_CONSOLE_DIR     Path to rhoai-maas-console checkout (default: ../rhoai-maas-console)
+  MAAS_API_KEY         Optional MaaS gateway API key to wire LiteLLM backends after Phase 9
 
 Phases:
   0  Preflight          Detect cluster state, decide which phases to run
@@ -102,6 +127,8 @@ Phases:
   6  Verify             6-phase E2E verification (API, auth, rate limits)
   7  Observability      Tempo + OpenTelemetry + COO + Gateway telemetry (only with --with-observability)
   8  External models    ExternalModel + governance (only with --with-external-models)
+  9  LiteMaaS           LiteMaaS + LiteLLM GUI PoC (only with --with-litemaas)
+ 10  MaaS Console       Thin native MaaS UI/BFF (only with --with-maas-console)
 
 Auto-detection (--model auto):
   No GPU             -> simulator (CPU-only, ~30s startup)
@@ -113,6 +140,28 @@ EOF
         *) log_error "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Resolve sibling GUI directories (absolute)
+if [ -z "$LITEMAAS_RHOAI_DIR" ]; then
+    LITEMAAS_RHOAI_DIR="$(cd "$GUIDE_DIR/../litemaas-rhoai" 2>/dev/null && pwd || echo "$GUIDE_DIR/../litemaas-rhoai")"
+fi
+if [ -z "$MAAS_CONSOLE_DIR" ]; then
+    MAAS_CONSOLE_DIR="$(cd "$GUIDE_DIR/../rhoai-maas-console" 2>/dev/null && pwd || echo "$GUIDE_DIR/../rhoai-maas-console")"
+fi
+# Normalize to absolute when path exists
+[ -d "$LITEMAAS_RHOAI_DIR" ] && LITEMAAS_RHOAI_DIR="$(cd "$LITEMAAS_RHOAI_DIR" && pwd)"
+[ -d "$MAAS_CONSOLE_DIR" ] && MAAS_CONSOLE_DIR="$(cd "$MAAS_CONSOLE_DIR" && pwd)"
+
+require_sibling_repo() {
+    local label="$1" dir="$2" script_rel="$3" env_name="$4" clone_hint="$5"
+    if [ ! -x "$dir/$script_rel" ] && [ ! -f "$dir/$script_rel" ]; then
+        log_error "$label checkout not found or missing $script_rel"
+        log_error "  Expected: $dir/$script_rel"
+        log_error "  Clone $clone_hint next to this guide, or set $env_name to the repo path."
+        return 1
+    fi
+    return 0
+}
 
 run_cmd() {
     if [ "$DRY_RUN" = true ]; then
@@ -237,6 +286,8 @@ should_run 5 && [ "$SKIP_MODELS" = false ] && PHASES_TO_RUN="$PHASES_TO_RUN 5"
 should_run 6 && [ "$SKIP_VERIFY" = false ] && PHASES_TO_RUN="$PHASES_TO_RUN 6"
 should_run 7 && [ "$WITH_OBSERVABILITY" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 7"
 should_run 8 && [ "$WITH_EXTERNAL_MODELS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 8"
+should_run 9 && [ "$WITH_LITEMAAS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 9"
+should_run 10 && [ "$WITH_MAAS_CONSOLE" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 10"
 echo ""
 log_info "Phases to run:${PHASES_TO_RUN:- (none)}"
 
@@ -1082,6 +1133,93 @@ if should_run 8 && [ "$WITH_EXTERNAL_MODELS" = true ]; then
 fi
 
 # =============================================================================
+# Phase 9: LiteMaaS + LiteLLM (Optional)
+# =============================================================================
+if should_run 9 && [ "$WITH_LITEMAAS" = true ]; then
+    log_phase 9 "LiteMaaS + LiteLLM (PoC GUI)"
+
+    if ! require_sibling_repo "LiteMaaS (litemaas-rhoai)" "$LITEMAAS_RHOAI_DIR" \
+        "scripts/install.sh" "LITEMAAS_RHOAI_DIR" \
+        "litemaas-rhoai (local clone next to this guide)"; then
+        log_error "Aborting Phase 9"
+        exit 1
+    fi
+
+    log_step "Installing LiteMaaS into namespace litemaas..."
+    log_info "Using: $LITEMAAS_RHOAI_DIR"
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would run: $LITEMAAS_RHOAI_DIR/scripts/install.sh"
+    else
+        (
+            cd "$LITEMAAS_RHOAI_DIR"
+            ./scripts/install.sh
+        )
+        log_info "LiteMaaS Helm install finished"
+
+        if [ -n "$MAAS_API_KEY" ]; then
+            log_step "Wiring LiteLLM backends to MaaS gateway (MAAS_API_KEY set)..."
+            export MAAS_API_KEY
+            export MAAS_GATEWAY="https://maas.${CLUSTER_DOMAIN}"
+            (
+                cd "$LITEMAAS_RHOAI_DIR"
+                ./scripts/wire-maas-models.sh --discover-cluster --api-key "$MAAS_API_KEY" --all \
+                    || log_warn "wire-maas-models.sh reported issues — register backends manually later"
+            )
+        else
+            log_warn "MAAS_API_KEY not set — skipping LiteLLM model wire"
+            log_info "  After creating a MaaS API key:"
+            log_info "  export MAAS_API_KEY=... MAAS_GATEWAY=https://maas.${CLUSTER_DOMAIN}"
+            log_info "  (cd $LITEMAAS_RHOAI_DIR && ./scripts/wire-maas-models.sh --discover-cluster --api-key \"\$MAAS_API_KEY\" --all)"
+        fi
+
+        if [ -x "$SCRIPT_DIR/verify-guis.sh" ] || [ -f "$SCRIPT_DIR/verify-guis.sh" ]; then
+            "$SCRIPT_DIR/verify-guis.sh" --litemaas || log_warn "LiteMaaS soft verify had warnings"
+        fi
+    fi
+fi
+
+# =============================================================================
+# Phase 10: RHOAI MaaS Console (Optional)
+# =============================================================================
+if should_run 10 && [ "$WITH_MAAS_CONSOLE" = true ]; then
+    log_phase 10 "RHOAI MaaS Console (native UX, no LiteLLM)"
+
+    if ! require_sibling_repo "MaaS Console (rhoai-maas-console)" "$MAAS_CONSOLE_DIR" \
+        "scripts/deploy.sh" "MAAS_CONSOLE_DIR" \
+        "https://github.com/lcardonag/rhoai-maas-console (or your local clone)"; then
+        log_error "Aborting Phase 10"
+        exit 1
+    fi
+
+    MAAS_GW_URL="https://maas.${CLUSTER_DOMAIN}"
+    log_step "Applying Phase 2 RBAC (maas-admins)..."
+    log_info "Using: $MAAS_CONSOLE_DIR"
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would run apply-phase2-rbac.sh and deploy.sh with MAAS_GATEWAY_URL=$MAAS_GW_URL"
+    else
+        if [ -f "$MAAS_CONSOLE_DIR/scripts/apply-phase2-rbac.sh" ]; then
+            (
+                cd "$MAAS_CONSOLE_DIR"
+                ./scripts/apply-phase2-rbac.sh
+            ) || log_warn "apply-phase2-rbac.sh had warnings — continuing deploy"
+        else
+            log_warn "apply-phase2-rbac.sh not found — skipping RBAC apply"
+        fi
+
+        log_step "Deploying MaaS Console (builds + Helm)..."
+        (
+            cd "$MAAS_CONSOLE_DIR"
+            export MAAS_GATEWAY_URL="$MAAS_GW_URL"
+            ./scripts/deploy.sh
+        )
+
+        if [ -x "$SCRIPT_DIR/verify-guis.sh" ] || [ -f "$SCRIPT_DIR/verify-guis.sh" ]; then
+            "$SCRIPT_DIR/verify-guis.sh" --maas-console || log_warn "MaaS Console soft verify had warnings"
+        fi
+    fi
+fi
+
+# =============================================================================
 # Final Summary
 # =============================================================================
 echo ""
@@ -1121,12 +1259,23 @@ else
         done
     fi
 
+    if [ "$WITH_LITEMAAS" = true ] || oc get ns litemaas &>/dev/null; then
+        LITE_HOST=$(oc get route -n litemaas -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' 2>/dev/null | grep -E '^litemaas\.' | head -1 || true)
+        [ -n "$LITE_HOST" ] && log_info "LiteMaaS UI:   https://${LITE_HOST}"
+    fi
+    if [ "$WITH_MAAS_CONSOLE" = true ] || oc get ns rhoai-maas-console &>/dev/null; then
+        CONSOLE_HOST=$(oc -n rhoai-maas-console get route rhoai-maas-console -o jsonpath='{.spec.host}' 2>/dev/null || true)
+        [ -n "$CONSOLE_HOST" ] && log_info "MaaS Console:  https://${CONSOLE_HOST}"
+    fi
+
     echo ""
     log_info "Next steps:"
     [ "$SKIP_MODELS" = true ] && log_info "  Deploy models:      ./scripts/deploy-model.sh --model auto"
     [ "$SKIP_VERIFY" = true ] && log_info "  Run verification:   ./scripts/verify-maas.sh"
     [ "$WITH_OBSERVABILITY" = false ] && log_info "  Add observability:  $0 --from-phase 7 --with-observability"
     [ "$WITH_EXTERNAL_MODELS" = false ] && log_info "  Add external models: $0 --from-phase 8 --with-external-models --external-model-provider openai --external-model-api-key <KEY>"
+    [ "$WITH_LITEMAAS" = false ] && log_info "  Add LiteMaaS GUI:    $0 --from-phase 9 --with-litemaas"
+    [ "$WITH_MAAS_CONSOLE" = false ] && log_info "  Add MaaS Console:    $0 --from-phase 10 --with-maas-console"
     log_info "  RHOAI Dashboard:    https://$(oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null || echo '<dashboard-route>')"
 fi
 

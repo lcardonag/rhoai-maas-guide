@@ -1,0 +1,15 @@
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: granite-rhai
+  namespace: llm
+  annotations:
+    # Path only — no scheme/host, no trailing slash.
+    # Console BFF uses this for test-connection + HTTPRoute URLRewrite heal.
+    rhoai-maas-console/upstream-path-prefix: "/v1/projects/REPLACE-PROJECT-UUID/inference"
+spec:
+  provider: openai
+  targetModel: REPLACE-TARGET-MODEL-ID
+  endpoint: REPLACE-FQDN
+  credentialRef:
+    name: granite-rhai-credentials

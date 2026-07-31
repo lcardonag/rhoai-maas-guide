@@ -1,0 +1,12 @@
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSModelRef
+metadata:
+  name: granite-rhai
+  namespace: llm
+  annotations:
+    openshift.io/display-name: "Granite via RHAI (external)"
+    openshift.io/description: "OpenAI-compatible IBM RHAI / Inference as a Service"
+spec:
+  modelRef:
+    kind: ExternalModel
+    name: granite-rhai

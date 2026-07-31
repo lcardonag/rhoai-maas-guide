@@ -26,7 +26,7 @@ This runs Phases 0-6 automatically. The script detects what's already installed 
 | `auto`
 
 | `--from-phase <N>`
-| Start from phase N (0-7), skipping earlier phases
+| Start from phase N (0-10), skipping earlier phases
 | `0`
 
 | `--skip-models`
@@ -39,6 +39,14 @@ This runs Phases 0-6 automatically. The script detects what's already installed 
 
 | `--with-observability`
 | Also run Phase 7 (COO + Gateway telemetry)
+|
+
+| `--with-litemaas`
+| Also run Phase 9 (LiteMaaS + LiteLLM PoC; sibling `litemaas-rhoai`)
+|
+
+| `--with-maas-console`
+| Also run Phase 10 (RHOAI MaaS Console; sibling `rhoai-maas-console`)
 |
 
 | `--dry-run`
@@ -83,6 +91,14 @@ This runs Phases 0-6 automatically. The script detects what's already installed 
 | 7
 | Observability - COO subscription + Gateway TelemetryPolicy
 | 2-3 min
+
+| 9
+| LiteMaaS + LiteLLM (optional) - sibling install into `litemaas`
+| 5-15 min
+
+| 10
+| MaaS Console (optional) - thin native UI into `rhoai-maas-console`
+| 5-15 min
 |===
 
 == Common Usage Patterns
@@ -102,6 +118,27 @@ For a fresh cluster with no MaaS components:
 ----
 ./scripts/setup-maas.sh --with-observability
 ----
+
+=== With optional GUIs
+
+[source,bash]
+----
+./scripts/setup-maas.sh --with-maas-console
+./scripts/setup-maas.sh --with-litemaas
+# Or both:
+./scripts/setup-maas.sh --with-maas-console --with-litemaas
+----
+
+See xref:09-optional-guis.adoc[Optional GUIs] for sibling repo paths and when to choose each.
+
+=== External-only (no local inference)
+
+[source,bash]
+----
+./scripts/setup-maas.sh --skip-models --with-maas-console
+----
+
+Then register OpenAI-compatible SaaS or IBM RHAI models per xref:08-external-models.adoc[Phase 8: External Models] (console Admin *Upstream path prefix*, or YAML templates under `manifests/08-external-models/openai-compatible-prefixed/`).
 
 === Resume from a specific phase
 

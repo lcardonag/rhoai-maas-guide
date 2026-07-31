@@ -1,0 +1,7 @@
+# Optional — only if you are not reusing namespace `llm` or existing `external-models`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-models
+  labels:
+    maas.opendatahub.io/gateway-access: "true"

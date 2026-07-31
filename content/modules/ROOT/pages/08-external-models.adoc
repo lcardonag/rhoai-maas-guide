@@ -1,39 +1,263 @@
 = Phase 8: External Models (Optional)
 
-NOTE: This phase requires a completed MaaS installation (through xref:04-rhoai-config.adoc[Phase 4]) and at least one local model deployed (xref:05-maas-models.adoc[Phase 5]) to validate the gateway is functional.
+You can run **RHOAI MaaS + optional GUIs with zero in-cluster inference**. The gateway fronts third-party **OpenAI-compatible** HTTP APIs (OpenAI, IBM RHAI / Red Hat AI Inference endpoints, Bedrock Mantle, etc.). Consumers always call the MaaS gateway; the platform injects the provider key and applies auth + token limits.
 
-The `ExternalModel` CRD lets you expose third-party LLM APIs (OpenAI, AWS Bedrock, Google Gemini, Azure OpenAI, etc.) through the MaaS gateway. External models get the same API key management, authentication, rate limiting, and usage tracking as locally-served models - your consumers use a single gateway endpoint regardless of where the model runs.
+TIP: All file paths and `oc apply` commands are relative to the link:{repo-url}[rhoai-maas-guide] repository root.
 
-TIP: All file paths and `oc apply` commands in this guide are relative to the link:{repo-url}[rhoai-maas-guide] repository root. Make sure you have cloned it and are working from its root directory (see xref:index.adoc#_getting_started[Getting Started]).
+IMPORTANT: Companion to the link:https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index[official RHOAI MaaS docs], not a replacement.
 
-IMPORTANT: This guide is not a replacement for the link:https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index[official {rhoai} {maas} documentation]. It is a companion resource with opinionated Kustomize manifests and automation scripts to accelerate deployment.
+== When to use this path
 
-== How It Works
+[cols="1,2"]
+|===
+| Goal | Approach
 
-An external model deployment requires five resources:
+| New cluster, no GPUs / no local vLLM
+| Phases *1–4* (+ *6* verify API) → Phase *8* external models → optional xref:09-optional-guis.adoc[GUIs] (`--with-maas-console` / `--with-litemaas`). Skip Phase 5 (`--skip-models`).
 
-. *Secret* - stores the provider API key. Must have the label `inference.networking.k8s.io/bbr-managed=true` so the BBR ext-proc can inject the credential into upstream requests.
+| OpenAI-compatible SaaS (root `/v1/...`)
+| `ExternalModel.spec.endpoint` = FQDN only (e.g. `api.openai.com`). Leave upstream path empty.
 
-. *ExternalModel* - defines the provider, target model, endpoint, and credential reference. The BBR (Backend Binding Resolver) handles path rewriting and authentication header injection.
+| OpenAI-compatible with *project* base path (IBM RHAI / Inference as a Service)
+| FQDN + *upstream path prefix* (e.g. `/v1/projects/<uuid>/inference`). Prefer *MaaS Console* Admin create (sets rewrite + annotation). YAML recipe below.
 
-. *MaaSModelRef* - registers the external model in the MaaS catalog so it appears in the API and can be governed.
+| Compare proxy UX ($ / virtual keys)
+| Same external models + `--with-litemaas` (wires LiteLLM to gateway).
+|===
 
-. *MaaSAuthPolicy* - grants access to specific users or groups.
+NOTE: Phase 5 (local models) is *not* required for external-only. The older note that you need a local model first is obsolete for this path — you only need a programmed MaaS gateway and maas-api.
 
-. *MaaSSubscription* - sets rate limits (tokens per hour) and priority.
+== Architecture (request path)
 
-== Step 1: Create the Namespace and Secret
+[source]
+----
+Client / GUI
+  → https://maas.<domain>/llm/<model>/v1/chat/completions
+  → AuthPolicy (MaaS API key sk-oai-…)
+  → HTTPRoute URLRewrite: strip /llm/<model> → /  OR  → /v1/projects/.../inference
+  → BBR injects provider Secret api-key as Authorization: Bearer …
+  → Upstream: https://{FQDN}{prefix}/v1/chat/completions
+----
 
-The external models live in their own namespace, separate from the MaaS platform and local models:
+Important field meanings:
+
+[cols="1,2"]
+|===
+| Field | Meaning
+
+| `ExternalModel.spec.endpoint`
+| *FQDN only* — no `https://`, no path, no port (e.g. `us-east.rhai.ibm.com`)
+
+| Upstream path prefix
+| Optional. Path only, starts with `/`, *no* trailing slash. Console annotation `rhoai-maas-console/upstream-path-prefix`. HTTPRoute `URLRewrite` target. *Not* ModelRef `endpointOverride`.
+
+| ModelRef `endpointOverride`
+| Optional *MaaS gateway catalog* URL (`https://maas…/llm/<name>`). Do *not* put the IBM project URL here.
+
+| `spec.provider`
+| BBR translator: usually `openai` for OpenAI-compatible hosts
+
+| `spec.targetModel`
+| Model id sent in the JSON body upstream
+|===
+
+== How It Works (five resources)
+
+. *Secret* — provider API key; labels `inference.networking.k8s.io/bbr-managed=true` *and* (RHOAI 3.4) `ipp-managed=true` when using the console path.
+. *ExternalModel* — provider, targetModel, endpoint FQDN, credentialRef (+ optional path-prefix annotation).
+. *MaaSModelRef* — catalog entry (must become *Ready*).
+. *MaaSAuthPolicy* — who may call the model on the gateway.
+. *MaaSSubscription* — who may mint API keys + Limitador token windows.
+
+== Path A — MaaS Console Admin (recommended for IBM / RHAI)
+
+Requires xref:09-optional-guis.adoc[Phase 10] (`--with-maas-console`) and an admin in `maas-admins`.
+
+. Deploy MaaS without local models:
++
+[source,bash]
+----
+./scripts/setup-maas.sh --skip-models --with-maas-console
+# or later:
+./scripts/setup-maas.sh --from-phase 10 --with-maas-console
+----
+
+. Open the console → *Admin* → *Model refs* → *Create* → Backend *ExternalModel*.
+
+. Fill:
++
+[cols="1,2"]
+|===
+| Field | Example (IBM RHAI / Inference as a Service)
+
+| Name / ModelRef id
+| `granite-rhai` (catalog id clients use)
+
+| Namespace
+| `llm` (console default) or `external-models`
+
+| Provider
+| `openai`
+
+| Endpoint (FQDN)
+| `us-east.rhai.ibm.com` — *host only*
+
+| Upstream path prefix
+| `/v1/projects/002d4a39-9d40-4c25-a9fa-a603eebdb574/inference` — *no* trailing slash
+
+| Endpoint override
+| *leave empty*
+
+| Target model
+| Provider catalog id (e.g. `granite-4-0-h-small`)
+
+| API key
+| Real IBM / RHAI key (≥16 chars; not equal to name or targetModel)
+|===
+
+. Click *Test connection* (must pass). The BFF probes `https://{FQDN}{prefix}/v1/models` then chat.
+
+. *Save* — provisions Secret + ExternalModel + MaaSModelRef and heals HTTPRoute `URLRewrite` to the prefix.
+
+. Create *Subscription* + *AuthPolicy* (Admin forms) so the model is visible on *Models* and users can mint keys. Open = `system:authenticated`; restricted = enroll group or user-by-user Approve.
+
+. Users: subscribe / request access → *API keys* → call:
++
+[source,bash]
+----
+curl --http1.1 -sS -w '\nhttp_code=%{http_code}\n' -X POST \
+  "https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')/llm/granite-rhai/v1/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"granite-rhai","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+----
+
+TIP: After create, confirm rewrite: `oc get httproute granite-rhai -n llm -o yaml | grep -A6 URLRewrite` and annotation `rhoai-maas-console/upstream-path-prefix` on the ExternalModel.
+
+== Path B — YAML / oc (guide manifests + custom OpenAI-compatible)
+
+=== Skip local inference on a new cluster
+
+[source,bash]
+----
+./scripts/setup-maas.sh --skip-models
+# Then Phase 8 (stock OpenAI) or apply custom YAMLs below
+./scripts/setup-maas.sh --from-phase 8 --with-external-models \
+  --external-model-provider openai --external-model-api-key "$OPENAI_API_KEY"
+----
+
+=== Stock providers (OpenAI / Gemini / Bedrock)
+
+See sections below for guided OpenAI, Gemini, and Bedrock. Automated:
+
+[source,bash]
+----
+./scripts/setup-maas.sh --from-phase 8 \
+    --with-external-models \
+    --external-model-provider openai \
+    --external-model-api-key "$OPENAI_API_KEY"
+----
+
+=== Custom OpenAI-compatible host (root `/v1`)
+
+Copy the OpenAI layout under `manifests/08-external-models/openai/` and change `spec.endpoint` / `targetModel` / names. Example ExternalModel:
+
+[source,yaml]
+----
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: my-saas-model
+  namespace: external-models
+spec:
+  provider: openai
+  targetModel: my-model-id
+  endpoint: api.example.com   # FQDN only
+  credentialRef:
+    name: my-saas-api-key
+----
+
+Secret (never commit the key):
+
+[source,bash]
+----
+oc create secret generic my-saas-api-key \
+  --from-literal=api-key="$PROVIDER_API_KEY" \
+  -n external-models --dry-run=client -o yaml | oc apply -f -
+oc label secret my-saas-api-key -n external-models \
+  inference.networking.k8s.io/bbr-managed=true \
+  inference.networking.k8s.io/ipp-managed=true --overwrite
+----
+
+Then apply matching `MaaSModelRef`, `MaaSAuthPolicy`, and `MaaSSubscription` (see OpenAI `maas/` examples). After the HTTPRoute appears, ensure URLRewrite strips `/llm/<name>` → `/` (console heals this; for pure `oc`, patch as in <<urlrewrite>>).
+
+=== IBM RHAI / path-prefixed OpenAI-compatible (YAML)
+
+Platform `ExternalModel.spec.endpoint` cannot store a path. Use:
+
+. FQDN in `spec.endpoint`
+. Annotation for the project base path
+. HTTPRoute `URLRewrite` `ReplacePrefixMatch` = that path (console does this; YAML operators must patch the route)
+
+Templates: `manifests/08-external-models/openai-compatible-prefixed/` (placeholders).
+
+[source,yaml]
+----
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: granite-rhai
+  namespace: llm   # or external-models — match ModelRef ns
+  annotations:
+    # Consumed by RHOAI MaaS Console BFF for test-connection + URLRewrite heal
+    rhoai-maas-console/upstream-path-prefix: "/v1/projects/REPLACE-PROJECT-UUID/inference"
+spec:
+  provider: openai
+  targetModel: REPLACE-TARGET-MODEL-ID
+  endpoint: us-east.rhai.ibm.com
+  credentialRef:
+    name: granite-rhai-credentials
+----
+
+Upstream effective URL shape:
+
+[source]
+----
+https://us-east.rhai.ibm.com/v1/projects/<uuid>/inference/v1/chat/completions
+----
+
+Client (unchanged gateway shape):
+
+[source]
+----
+https://maas.<domain>/llm/granite-rhai/v1/chat/completions
+----
+
+[[urlrewrite]]
+==== Heal HTTPRoute URLRewrite (manual)
+
+After ModelRef is Ready and HTTPRoute exists:
+
+[source,bash]
+----
+# Example: rewrite /llm/granite-rhai → /v1/projects/<uuid>/inference
+# Prefer console Admin create (auto). Manual patch shape depends on HTTPRoute filters;
+# see console docs admin/subscriptions-and-enrollment.md (ExternalModel Chat 404 section).
+oc get httproute granite-rhai -n llm -o yaml
+----
+
+If inference returns `404 {"detail":"Not Found"}`, the rewrite is wrong or missing.
+
+== Step-by-step: stock OpenAI (manifests)
+
+=== Step 1: Namespace and Secret
 
 [source,bash]
 ----
 oc apply -f manifests/08-external-models/openai/namespace.yaml
 ----
 
-NOTE: The namespace manifest includes the `maas.opendatahub.io/gateway-access=true` label, which is required for the Gateway to accept HTTPRoutes from this namespace. If you create the namespace manually instead of using the manifest, remember to apply this label: `oc label namespace external-models maas.opendatahub.io/gateway-access=true --overwrite`
-
-Create the provider credential Secret. This is done imperatively (never stored in manifests):
+NOTE: Namespace needs `maas.opendatahub.io/gateway-access=true` for Gateway HTTPRoutes.
 
 [source,bash]
 ----
@@ -46,16 +270,14 @@ oc label secret openai-api-key -n external-models \
     inference.networking.k8s.io/bbr-managed=true --overwrite
 ----
 
-IMPORTANT: The `inference.networking.k8s.io/bbr-managed=true` label is required. Without it, the BBR ext-proc will not inject the API key into upstream requests and the provider will reject calls with 401.
+IMPORTANT: Without `bbr-managed=true`, upstream calls get 401 (provider key never injected).
 
-== Step 2: Apply the ExternalModel CR
+=== Step 2: ExternalModel CR
 
 [source,bash]
 ----
 oc apply -k manifests/08-external-models/openai/model/
 ----
-
-This creates the `ExternalModel` resource:
 
 [source,yaml]
 ----
@@ -72,63 +294,46 @@ spec:
     name: openai-api-key
 ----
 
-== Step 3: Apply MaaS Governance
+=== Step 3: MaaS governance
 
 [source,bash]
 ----
 oc apply -k manifests/08-external-models/openai/maas/
 ----
 
-This creates three resources:
-
-* `MaaSModelRef` - registers `gpt-4o-mini` in the MaaS catalog
-* `MaaSAuthPolicy` - grants all authenticated users access
-* `MaaSSubscription` - sets a free tier with 10,000 tokens/hour rate limit
+Creates `MaaSModelRef`, open `MaaSAuthPolicy`, and free-tier `MaaSSubscription` (10k tokens/hour).
 
 == Verification
-
-Check the MaaSModelRef reaches `Ready`:
 
 [source,bash]
 ----
 oc get maasmodelref gpt-4o-mini -n external-models
 # Expected: PHASE = Ready
-----
 
-Check the model appears in the MaaS API:
-
-[source,bash]
-----
 MAAS_GW="https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
 curl -sk "${MAAS_GW}/maas-api/v1/models" \
     -H "Authorization: Bearer $(oc whoami -t)" | python3 -m json.tool
 ----
 
-Create an API key and test inference:
-
 [source,bash]
 ----
-# Create an API key bound to the openai-free subscription
 API_KEY=$(curl -sk -X POST "${MAAS_GW}/maas-api/v1/api-keys" \
     -H "Authorization: Bearer $(oc whoami -t)" \
     -H "Content-Type: application/json" \
     -d '{"name": "openai-test", "subscription": "openai-free", "expiresIn": "1h"}' \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token') or d.get('key'))")
 
-# Test inference
-curl -sk "${MAAS_GW}/external-models/gpt-4o-mini/v1/chat/completions" \
+curl --http1.1 -sk "${MAAS_GW}/external-models/gpt-4o-mini/v1/chat/completions" \
     -H "Authorization: Bearer ${API_KEY}" \
     -H "Content-Type: application/json" \
     -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Say hello in 3 words."}], "max_tokens": 20}'
 ----
 
-A successful response contains a `choices` array with the model's reply.
+Catalog models created via console in `llm` use `/llm/<name>/v1/...` (same auth).
 
-WARNING: There is a known platform bug where the BBR ext-proc filter is never inserted into the Envoy filter chain due to an EnvoyFilter match mismatch. If inference returns 404, see the <<known-issues>> section below. This is tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68594[RHOAIENG-68594].
+WARNING: Platform BBR EnvoyFilter match bugs can cause 404/401 — see <<known-issues>>. Console deploys a durable BBR anchor EnvoyFilter when you use `--with-maas-console`.
 
 == Automated Setup
-
-The setup script handles all of the above in a single command:
 
 [source,bash]
 ----
@@ -138,135 +343,21 @@ The setup script handles all of the above in a single command:
     --external-model-api-key "$OPENAI_API_KEY"
 ----
 
-The `--external-model-provider` flag selects which provider manifests to deploy (`openai`, `gemini`, or `bedrock`; default: `openai`).
+`--external-model-provider`: `openai` | `gemini` | `bedrock`.
 
 == Other Providers
 
 [[google-gemini]]
 === Google Gemini
 
-Manifests for Google Gemini (`gemini-2.5-flash`) are included under `manifests/08-external-models/gemini/`. To deploy Gemini instead of OpenAI, use `--external-model-provider gemini`.
+Manifests: `manifests/08-external-models/gemini/`. Flag: `--external-model-provider gemini`.
 
-WARNING: There is a known incompatibility between the Gemini API and the BBR `openai` provider translator. The BBR hardcodes the upstream path to `/v1/chat/completions`, but Gemini's OpenAI-compatible endpoint requires `/v1beta/openai/chat/completions`. This means ExternalModel registration and MaaS governance will work correctly, but inference requests will return HTTP 404 from Google's API. This is tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68592[RHOAIENG-68592] and link:https://github.com/opendatahub-io/ai-gateway-payload-processing/issues/260[upstream issue #260]. Once a `gemini` provider translator is added to the BBR, Gemini external models will work end-to-end.
-
-To deploy with Gemini (registration only, inference will 404):
-
-[source,bash]
-----
-./scripts/setup-maas.sh --from-phase 8 \
-    --with-external-models \
-    --external-model-provider gemini \
-    --external-model-api-key "$GEMINI_API_KEY"
-----
+WARNING: BBR `openai` translator hardcodes `/v1/chat/completions`; Gemini OpenAI-compat needs `/v1beta/openai/chat/completions` → inference often 404. Registration/governance still work. Tracked RHOAIENG-68592.
 
 [[aws-bedrock]]
 === AWS Bedrock
 
-Manifests for AWS Bedrock (`openai.gpt-oss-20b` via the Mantle endpoint) are included under `manifests/08-external-models/bedrock/`. Bedrock uses the `bedrock-openai` provider, which routes through the OpenAI-compatible Mantle API - no request body translation is needed.
-
-WARNING: Use `bedrock-mantle.<region>.api.aws`, *not* `bedrock-runtime.<region>.amazonaws.com`. The BBR translator uses `/v1/chat/completions`, which is only available on the Mantle endpoint. Using `bedrock-runtime` will result in 404 errors.
-
-==== Prerequisites
-
-Bedrock requires a *Bedrock API Key* (ABSK key), not standard AWS access keys. Create one via IAM service-specific credentials:
-
-[source,bash]
-----
-# Create an IAM user for Bedrock API access
-aws iam create-user --user-name bedrock-api-user
-
-# Attach Bedrock access policy
-aws iam attach-user-policy \
-    --user-name bedrock-api-user \
-    --policy-arn arn:aws:iam::aws:policy/AmazonBedrockLimitedAccess
-
-# Generate a long-term ABSK key (up to 90 days)
-aws iam create-service-specific-credential \
-    --user-name bedrock-api-user \
-    --service-name bedrock.amazonaws.com \
-    --credential-age-days 90
-----
-
-The output contains a `ServiceSpecificCredential.ServicePassword` field starting with `ABSK` - this is the API key to use.
-
-TIP: Verify the ABSK key works before deploying: `curl -s "https://bedrock-mantle.us-east-2.api.aws/v1/models" -H "Authorization: Bearer $BEDROCK_API_KEY" | python3 -m json.tool`
-
-==== Manual Deployment
-
-Create the namespace if it does not already exist (shared with other external model providers):
-
-[source,bash]
-----
-oc apply -f manifests/08-external-models/bedrock/namespace.yaml
-----
-
-Create the credential Secret (never stored in manifests):
-
-[source,bash]
-----
-oc create secret generic bedrock-api-key \
-    --from-literal=api-key="$BEDROCK_API_KEY" \
-    -n external-models \
-    --dry-run=client -o yaml | oc apply -f -
-
-oc label secret bedrock-api-key -n external-models \
-    inference.networking.k8s.io/bbr-managed=true --overwrite
-----
-
-Apply the ExternalModel and MaaS governance resources:
-
-[source,bash]
-----
-oc apply -k manifests/08-external-models/bedrock/model/
-oc apply -k manifests/08-external-models/bedrock/maas/
-----
-
-The ExternalModel CR:
-
-[source,yaml]
-----
-apiVersion: maas.opendatahub.io/v1alpha1
-kind: ExternalModel
-metadata:
-  name: aws-gpt-oss-20b
-  namespace: external-models
-spec:
-  provider: bedrock-openai
-  targetModel: openai.gpt-oss-20b
-  endpoint: bedrock-mantle.us-east-2.api.aws
-  credentialRef:
-    name: bedrock-api-key
-----
-
-NOTE: The `endpoint` must match your AWS region. Replace `us-east-2` with your region if different.
-
-Verify the model reaches Ready:
-
-[source,bash]
-----
-oc get maasmodelref aws-gpt-oss-20b -n external-models
-# Expected: PHASE = Ready
-----
-
-Test inference:
-
-[source,bash]
-----
-MAAS_GW="https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
-
-API_KEY=$(curl -sk -X POST "${MAAS_GW}/maas-api/v1/api-keys" \
-    -H "Authorization: Bearer $(oc whoami -t)" \
-    -H "Content-Type: application/json" \
-    -d '{"name": "bedrock-test", "subscription": "bedrock-free", "expiresIn": "1h"}' \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
-
-curl -sk "${MAAS_GW}/external-models/aws-gpt-oss-20b/v1/chat/completions" \
-    -H "Authorization: Bearer ${API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"model": "openai.gpt-oss-20b", "messages": [{"role": "user", "content": "Say hello in 3 words."}], "max_tokens": 20}'
-----
-
-==== Automated Deployment
+Manifests: `manifests/08-external-models/bedrock/`. Use Mantle host `bedrock-mantle.<region>.api.aws` and provider `bedrock-openai`. ABSK API key required — see Bedrock IAM steps in older guide revisions or AWS docs.
 
 [source,bash]
 ----
@@ -281,21 +372,15 @@ curl -sk "${MAAS_GW}/external-models/aws-gpt-oss-20b/v1/chat/completions" \
 
 === ext-proc filter not inserted (RHOAIENG-68594)
 
-The `payload-processing` EnvoyFilter matches on a WasmPlugin-style filter name (`extensions.istio.io/wasmplugin/...`), but Kuadrant creates the Wasm filter with the generic name `envoy.filters.http.wasm`. The match fails, so the BBR ext-proc is never added to the Envoy filter chain. Without ext-proc, there is no path rewriting and no credential injection - inference returns 404 or 401 from the upstream provider.
-
-This affects all external model providers. A temporary workaround (reverted by the MaaS controller within seconds):
-
-[source,bash]
-----
-oc patch envoyfilter payload-processing -n openshift-ingress --type='json' \
-  -p='[{"op": "replace", "path": "/spec/configPatches/0/match/listener/filterChain/filter/subFilter/name", "value": "envoy.filters.http.wasm"}]'
-----
-
-Tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68594[RHOAIENG-68594].
+`payload-processing` EnvoyFilter may not attach; no credential injection / path rewrite → 401/404. Console `--with-maas-console` applies `scripts/fix-payload-processing-envoyfilter.sh` (durable anchor). Re-apply after MaaS/RHCL upgrades.
 
 === Gemini path incompatibility (RHOAIENG-68592)
 
-The BBR `openai` provider hardcodes the upstream path to `/v1/chat/completions`, but Gemini requires `/v1beta/openai/chat/completions`. See the <<google-gemini,Google Gemini>> section above for details. Tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68592[RHOAIENG-68592].
+See <<google-gemini>>.
+
+=== Wrong field for IBM project URL
+
+Putting `https://…/v1/projects/…/inference/` in *Endpoint override* does nothing for upstream routing. Use FQDN + *Upstream path prefix* (console) or the annotation + URLRewrite (YAML).
 
 == Appendix
 
@@ -304,57 +389,24 @@ The BBR `openai` provider hardcodes the upstream path to `/v1/chat/completions`,
 [source]
 ----
 manifests/08-external-models/
-  openai/
-    kustomization.yaml           # Top-level: namespace + model + maas
-    namespace.yaml               # external-models namespace
-    model/
-      kustomization.yaml
-      external-model.yaml        # ExternalModel CR (gpt-4o-mini)
-    maas/
-      kustomization.yaml
-      maas-model.yaml            # MaaSModelRef
-      maas-auth-policy.yaml      # MaaSAuthPolicy (system:authenticated)
-      maas-subscription.yaml     # MaaSSubscription (10k tokens/hour)
-  gemini/
-    kustomization.yaml
-    namespace.yaml
-    model/
-      kustomization.yaml
-      external-model.yaml        # ExternalModel CR (gemini-2.5-flash)
-    maas/
-      kustomization.yaml
-      maas-model.yaml
-      maas-auth-policy.yaml
-      maas-subscription.yaml
-  bedrock/
-    kustomization.yaml
-    namespace.yaml
-    model/
-      kustomization.yaml
-      external-model.yaml        # ExternalModel CR (openai.gpt-oss-20b via Mantle)
-    maas/
-      kustomization.yaml
-      maas-model.yaml
-      maas-auth-policy.yaml
-      maas-subscription.yaml
+  openai/ ... gemini/ ... bedrock/
+  openai-compatible-prefixed/   # IBM RHAI-style templates (placeholders)
 ----
 
-=== Supported Providers
+=== Supported ExternalModel providers (BBR)
 
-The `provider` field in the ExternalModel spec maps to a BBR payload translator. Currently supported values:
-
-* `openai` - OpenAI API (`api.openai.com`)
-* `anthropic` - Anthropic API
-* `azure-openai` - Azure OpenAI Service
-* `bedrock-openai` - AWS Bedrock (OpenAI-compatible)
+* `openai`
+* `anthropic`
+* `azure-openai`
+* `bedrock-openai`
 
 == References
 
 * link:https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index#maas-external-model_maas-deploy[RHOAI ExternalModel documentation]
-* link:https://github.com/opendatahub-io/ai-gateway-payload-processing[BBR (ai-gateway-payload-processing) repository]
-* link:https://redhat.atlassian.net/browse/RHOAIENG-68594[RHOAIENG-68594 - ext-proc EnvoyFilter match mismatch (all providers)]
-* link:https://redhat.atlassian.net/browse/RHOAIENG-68592[RHOAIENG-68592 - Gemini BBR path incompatibility]
+* RHOAI MaaS Console operator notes: `rhoai-maas-console/docs/admin/subscriptions-and-enrollment.md` (ExternalModel + path prefix)
+* link:https://github.com/opendatahub-io/ai-gateway-payload-processing[BBR repository]
 
-== Next step
+== Next steps
 
-Proceed to xref:08-architecture.adoc[Architecture & Request Flow].
+* xref:09-optional-guis.adoc[Optional GUIs] — Console and/or LiteMaaS without local inference
+* xref:08-architecture.adoc[Architecture & Request Flow]

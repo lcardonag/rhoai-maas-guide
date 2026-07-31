@@ -1,0 +1,20 @@
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSSubscription
+metadata:
+  name: granite-rhai-free
+  namespace: models-as-a-service
+  annotations:
+    openshift.io/display-name: "RHAI Granite free"
+    maas.rhoai.io/access-mode: open
+spec:
+  owner:
+    groups:
+      - name: system:authenticated
+    users: []
+  modelRefs:
+    - name: granite-rhai
+      namespace: llm
+      tokenRateLimits:
+        - limit: 10000
+          window: 1h
+  priority: 10

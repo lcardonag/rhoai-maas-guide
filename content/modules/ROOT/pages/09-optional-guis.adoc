@@ -1,0 +1,112 @@
+= Phase 9–10: Optional GUIs (LiteMaaS and MaaS Console)
+
+After native RHOAI MaaS is up (phases 1–4 minimum; *local models optional*), you can optionally install one or both GUIs.
+They live in **separate namespaces** and can coexist.
+
+TIP: For *external-only* clusters (no GPU / no in-cluster vLLM), use `./scripts/setup-maas.sh --skip-models` then xref:08-external-models.adoc[Phase 8] (OpenAI-compatible SaaS, including IBM RHAI path prefixes), then `--with-maas-console` and/or `--with-litemaas`.
+
+== Which GUI should I use?
+
+[cols="1,2,2"]
+|===
+| | *RHOAI MaaS Console (recommended product path)* | *LiteMaaS + LiteLLM (PoC)*
+
+| Flag
+| `--with-maas-console`
+| `--with-litemaas`
+
+| Namespace
+| `rhoai-maas-console`
+| `litemaas`
+
+| Architecture
+| Thin UI/BFF over *native* maas-api + Kuadrant/Limitador
+| Full stack with *LiteLLM* proxy + Postgres/Redis
+
+| Inference path
+| Client → MaaS gateway `/llm/<model>/v1/...`
+| Client → LiteLLM → (usually) MaaS gateway
+
+| Best for
+| Production-shaped demos on RHOAI MaaS only
+| Comparing LiteMaaS UX; $ budgets / virtual keys / single base URL
+
+| Sibling repo
+| `rhoai-maas-console` (`MAAS_CONSOLE_DIR`)
+| `litemaas-rhoai` (`LITEMAAS_RHOAI_DIR`)
+|===
+
+*Product path:* prefer the MaaS Console. LiteMaaS remains a side-by-side PoC; this guide does not merge LiteLLM into the console.
+
+== Prerequisites
+
+* Phases 1–6 complete (gateway `https://maas.<cluster-domain>` healthy).
+* Sibling repos checked out *next to* this guide (or set the env vars below).
+* `oc` logged in as a user that can create projects / run Helm installs.
+* For LiteMaaS wire step: a MaaS API key (`MAAS_API_KEY`).
+
+== Automated install
+
+[source,bash]
+----
+# MaaS + thin console (no LiteLLM)
+./scripts/setup-maas.sh --with-maas-console
+
+# MaaS + LiteMaaS/LiteLLM PoC
+./scripts/setup-maas.sh --with-litemaas
+
+# Both GUIs
+./scripts/setup-maas.sh --with-maas-console --with-litemaas
+
+# Resume GUI-only after core is done
+./scripts/setup-maas.sh --from-phase 10 --with-maas-console
+./scripts/setup-maas.sh --from-phase 9 --with-litemaas
+----
+
+=== Environment
+
+[cols="1,2"]
+|===
+| Variable | Meaning
+
+| `MAAS_CONSOLE_DIR`
+| Path to `rhoai-maas-console` (default `../rhoai-maas-console`)
+
+| `LITEMAAS_RHOAI_DIR`
+| Path to `litemaas-rhoai` (default `../litemaas-rhoai`)
+
+| `MAAS_API_KEY`
+| Optional. When set during Phase 9, runs `wire-maas-models.sh --discover-cluster --all`
+
+| `MAAS_GATEWAY_URL`
+| Set automatically by Phase 10 for console Helm (`https://maas.<domain>`)
+|===
+
+== What each phase runs
+
+=== Phase 9 — LiteMaaS
+
+. Calls `$LITEMAAS_RHOAI_DIR/scripts/install.sh` (Helm into `litemaas`).
+. If `MAAS_API_KEY` is set, wires LiteLLM backends to the cluster MaaS gateway.
+. Soft-verifies namespace/routes via `./scripts/verify-guis.sh --litemaas`.
+
+See `manifests/09-litemaas/README.md`.
+
+=== Phase 10 — MaaS Console
+
+. Runs `$MAAS_CONSOLE_DIR/scripts/apply-phase2-rbac.sh` (maas-admins) when present.
+. Runs `$MAAS_CONSOLE_DIR/scripts/deploy.sh` with `MAAS_GATEWAY_URL=https://maas.<domain>`.
+. Soft-verifies via `./scripts/verify-guis.sh --maas-console`.
+
+See `manifests/10-maas-console/README.md`.
+
+== Manual verify
+
+[source,bash]
+----
+./scripts/verify-guis.sh
+./scripts/verify-guis.sh --maas-console
+./scripts/verify-guis.sh --litemaas
+----
+
+Open the printed route URLs, log in with OpenShift credentials, and confirm the model catalog matches your MaaS subscriptions.
