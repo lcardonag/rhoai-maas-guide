@@ -33,3 +33,7 @@ oc apply -f maas-subscription.yaml
 ```
 
 See Antora page **Phase 8: External Models** (`08-external-models.adoc`).
+
+## Removing a model
+
+Deleting these resources is not a plain `oc delete -f` of the same files (order matters, and the credential Secret is often shared across models on the same endpoint). See the **Removing an external model** section on the `08-external-models.adoc` Antora page for the ordered teardown and copy-paste `oc delete` examples.

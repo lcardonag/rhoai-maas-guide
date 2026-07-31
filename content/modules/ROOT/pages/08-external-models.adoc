@@ -156,7 +156,9 @@ It:
 . For each selected id: creates one *shared* credential Secret per endpoint (labels `inference.networking.k8s.io/bbr-managed=true` + `inference.networking.k8s.io/ipp-managed=true`), an `ExternalModel` (name sanitized from the model id), a `MaaSModelRef`, and — unless `--skip-governance` — an open `MaaSAuthPolicy` + `MaaSSubscription` (`system:authenticated`, 10k tokens/hour by default).
 . Heals the HTTPRoute `URLRewrite` for the catalog `/<namespace>/<name>` prefix, the same way Compact MaaS Admin does. External-model HTTPRoutes are created asynchronously by the MaaS controller, so the heal step polls (18 attempts, 5s apart ≈ 90s) instead of assuming the route exists immediately; if it never shows up in time, the script warns and *moves on to the next model* instead of aborting the whole `--all`/`--models` run.
 
-Every mutation is `oc apply` (or an idempotent `oc patch` for the HTTPRoute), so **re-running the same command is always safe** — already-created Secret/ExternalModel/MaaSModelRef/MaaSAuthPolicy/MaaSSubscription are simply reconciled to the same state, and the HTTPRoute heal short-circuits once it detects the desired `URLRewrite` is already in place.
+Every mutation is `oc apply` (or an idempotent `oc patch` for the HTTPRoute), so **re-running the same command against the same source is always safe** — already-created Secret/ExternalModel/MaaSModelRef/MaaSAuthPolicy/MaaSSubscription are simply reconciled to the same state, and the HTTPRoute heal short-circuits once it detects the desired `URLRewrite` is already in place.
+
+WARNING: If a model **name already exists** in the target namespace, re-running the script **updates it to the latest import** — it is *not* skipped. `oc apply` overwrites the existing `ExternalModel`'s endpoint, path prefix, and `credentialRef` (Secret) to match whatever source (`--endpoint`/`--path-prefix`/`--api-key`) you ran against *this time*. Same catalog name = one upstream, last writer wins. See <<resuming-a-model-name-collision,name-collision details>> below for a worked example and how to avoid it.
 
 IMPORTANT: If the provider's base URL already ends in `/v1` (e.g. `https://host/v1`), pass the **host only** to `--endpoint` — do *not* also pass `/v1` (or `--path-prefix /v1`). The script always appends `/v1/models` itself, so `--endpoint host/v1` becomes `GET https://host/v1/v1/models` and 404s. Only use `--path-prefix` for a base path *before* `/v1` (e.g. IBM RHAI's `/v1/projects/<uuid>/inference`, which is followed by its own `/v1/...`).
 
@@ -227,6 +229,19 @@ oc get httproute <name> -n llm -o yaml | grep -A6 URLRewrite
 # If missing, re-run the import command (heal_http_route is idempotent) or patch by hand — see <<urlrewrite>>.
 ----
 
+[[resuming-a-model-name-collision]]
+=== Re-running against a *different* source: name collisions overwrite, they don't skip
+
+WARNING: "Re-running is always safe" above assumes you're resuming *the same* import (same endpoint/models). If you instead run `--all`/`--models` against a **different** `--endpoint` and one of *its* discovered ids sanitizes to the **same `MaaSModelRef`/`ExternalModel` name** already registered from a previous run, that existing resource is **updated to point at the new source, not left alone**. `oc apply` has no notion of "already imported from somewhere else" — it just reconciles the named object to whatever manifest this run generated, so the endpoint, upstream path prefix, and credential Secret (`credentialRef`) all flip to the latest run. Same name = one upstream; **last writer wins**.
+
+Worked example: `gpt-oss-120b` was first imported from a remote workshop gateway (`--endpoint maas-rhdp.apps.maas.redhatworkshops.io ... --all`). Later, running `--all` again against IBM RHAI (`--endpoint us-east.rhai.ibm.com --path-prefix /v1/projects/<uuid>/inference ...`) discovers an id that also sanitizes to `gpt-oss-120b`. That single `ExternalModel gpt-oss-120b` now gets `oc apply`'d with IBM RHAI's endpoint, path prefix, and credentials — silently replacing the maas-rhdp backend. Clients still calling `/llm/gpt-oss-120b/...` are now served by IBM RHAI instead, with no error and no prompt.
+
+To avoid this:
+
+* **Keep both backends registered side by side** — give them distinct `MaaSModelRef`/`ExternalModel` names before the second import, e.g. `--name-prefix rhai-` (or `--name-prefix rhdp-` on the first run) so the sanitized names never collide.
+* **Only touch new ids, leave every existing name alone** — use `--models id1,id2,...` with just the ids you actually want added, instead of `--all`, when importing from a second source into a namespace that already has models from a first source.
+* Before a second `--all` against a new source, compare `oc get maasmodelref -n <ns> -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'` (already registered) against `--list` output from the *new* endpoint (what it would discover) to spot overlapping names ahead of time.
+
 NOTE: This script only registers models on the *native* MaaS gateway (`/llm/<name>/v1/...`). Wiring a separately-deployed LiteMaaS/LiteLLM PoC to those same models is a distinct, later, optional step — see below.
 
 [[after-import]]
@@ -273,6 +288,145 @@ Prefer manual control over which models/keys get wired, or need to target an end
 IMPORTANT: The locally-minted MaaS key above is **LiteLLM's upstream credential** — what LiteLLM sends to the native MaaS gateway on your behalf. It is *not* what end users use. LiteMaaS end users authenticate with their own **LiteMaaS virtual keys** (LiteMaaS UI → API keys), which LiteLLM maps internally to the correct upstream MaaS key.
 
 CAUTION: Don't confuse that **local** MaaS key (minted against *this* cluster's gateway, used only for wiring into LiteLLM) with a **remote provider key** like `$REMOTE_MAAS_API_KEY` used earlier to `import-external-models.sh --endpoint maas-rhdp...` *from* a different cluster's MaaS gateway. They authenticate against two different gateways for two entirely different purposes.
+
+[[removing-an-external-model]]
+== Removing an external model
+
+There is no `uninstall`/`delete` counterpart to `import-external-models.sh` — teardown is a manual, ordered `oc delete` sequence (or the equivalent Compact MaaS Admin clicks). Deleting out of order is usually harmless (governance CRs referencing a missing ModelRef just stop matching anything), but following the order below avoids a brief window where a `MaaSAuthPolicy`/`MaaSSubscription` still advertises a model whose backend is already gone.
+
+NOTE: Repointing a model to a different upstream doesn't require any of the deletion below — re-running `import-external-models.sh` against the new source with the **same** model name updates the existing `ExternalModel` in place (see <<resuming-a-model-name-collision>>). Use this teardown section only when you want the model gone entirely, not repointed.
+
+WARNING: Deleting the credential *Secret* is the one step that can break **other, unrelated models**. `import-external-models.sh` creates *one shared Secret per endpoint* (named `<endpoint-slug>-credentials`, reused for every model registered from that host in the same run), while Compact MaaS Admin's ExternalModel create/rotate flow creates a *dedicated* `<name>-credentials` Secret per model. Always check `credentialRef.name` on every `ExternalModel` still using that Secret before you delete it — see step 5.
+
+=== Rotate a key vs. remove a model
+
+* **Rotate only** (keep the model, replace the provider key): don't delete anything below. Compact MaaS Admin → *Model refs* → *Edit* → *Update provider API key* → *Test connection* → *Save* (rewrites the existing Secret in place). Manual equivalent: `oc create secret generic <name>-credentials --from-literal=api-key="$NEW_KEY" -n llm --dry-run=client -o yaml | oc apply -f -`, then re-apply the `bbr-managed`/`ipp-managed` labels (see <<known-issues>> if the labels don't stick after an upgrade).
+* **Remove one model** on a host that serves several: run steps 1–4 below for that model only, then check step 5 before touching the shared Secret — other `ExternalModel` CRs on the same host are probably still using it.
+* **Remove an entire endpoint** (every model registered from one host): repeat steps 1–4 for *each* model on that host, confirm no `ExternalModel` still references the shared Secret, *then* delete the Secret last.
+
+=== Teardown order
+
+. **(Optional) Revoke the user-minted MaaS API keys tied to that subscription.** Not required to remove the model — existing keys simply stop working once the `MaaSSubscription`/`MaaSAuthPolicy` are deleted (step 2) — but revoking first gives clean audit trail / immediate denial instead of a 403 on next use. Compact MaaS Admin → *Subscriptions* → open the subscription → *API keys*, or via the dashboard's own *API keys* page (self-service, own keys only). Scripted, if you already have the key `id` (returned at mint time, or from the UI):
++
+[source,bash]
+----
+MAAS_GW="https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
+curl -sk -X DELETE "${MAAS_GW}/maas-api/v1/api-keys/${API_KEY_ID}" \
+    -H "Authorization: Bearer $(oc whoami -t)"
+----
+
+. **Delete the governance CRs** — `MaaSSubscription` and `MaaSAuthPolicy` (namespace `models-as-a-service` by default). Names follow the `<name>-free` / `<name>-access` convention used by `import-external-models.sh`, Path C manifests, and Compact MaaS Admin:
++
+[source,bash]
+----
+oc delete maassubscription <name>-free -n models-as-a-service
+oc delete maasauthpolicy <name>-access -n models-as-a-service
+----
++
+Compact MaaS Admin path: *Subscriptions* → delete the subscription → *Auth policies* → delete the matching policy. Delete the Subscription first (stops new key mints) and the AuthPolicy right after (stops the gateway from accepting already-minted keys) so there's no in-between window where old keys still authenticate against a model you're mid-removal on.
+
+. **Delete the catalog + backend CRs** — `MaaSModelRef` and `ExternalModel` (namespace `llm` for Compact MaaS-created models, `external-models` for Path C manifests — check `oc get maasmodelref -A` if unsure):
++
+[source,bash]
+----
+oc delete maasmodelref <name> -n llm
+oc delete externalmodel <name> -n llm
+----
++
+Compact MaaS Admin path: *Model refs* → delete the entry (this also deletes the underlying `ExternalModel` it created).
+
+. **Delete the leftover `HTTPRoute`, if the reconciler didn't already garbage-collect it:**
++
+[source,bash]
+----
+oc get httproute <name> -n llm
+# if still present:
+oc delete httproute <name> -n llm
+----
+
+. **Delete the credential Secret — only if nothing else still uses it.** Check first:
++
+[source,bash]
+----
+# Every ExternalModel still pointing at this Secret, across all namespaces:
+oc get externalmodel -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" -> "}{.spec.credentialRef.name}{"\n"}{end}' \
+    | grep '<secret-name>'
+----
++
+* Empty output → safe to delete:
++
+[source,bash]
+----
+oc delete secret <secret-name> -n llm
+----
+* Any lines returned → **do not delete**; another model (possibly registered in a different `import-external-models.sh` run against the same `--endpoint`) still authenticates through that Secret. Remove those models first, or leave the Secret in place.
++
+Rule of thumb for *which* Secret name to check: Compact MaaS Admin-created models use a dedicated `<name>-credentials` Secret (safe to delete once that one model is gone); `import-external-models.sh`-created models share `<endpoint-slug>-credentials` across every model pulled from that `--endpoint` in the same run (only delete once *all* of them are gone).
+
+. **If the model was wired into LiteMaaS/LiteLLM** (<<after-import,After import: Compact MaaS vs LiteMaaS>>), native MaaS deletion above does **not** touch LiteLLM's separate model registry — its entry (and any `wire-*`-minted upstream MaaS key) stays behind as a dangling backend. `litemaas-rhoai`'s `wire-maas-models.sh` / `wire-all-ready-models.sh` only *add* models (`POST /model/new`) — there is no `--delete` counterpart, so remove it one of two ways:
++
+--
+* **LiteMaaS/LiteLLM admin UI** (simplest): sign in as an admin → *Models* → find the entry → *Delete*. Requires a **Models Sync** afterwards if end users should stop seeing it in the LiteMaaS catalog (Admin → Tools → *Models Sync* — see `litemaas-rhoai/docs/wiring-models.md`, "When to sync LiteMaaS catalog").
+* **Raw LiteLLM proxy API**, using the same Secret `wire-all-ready-models.sh` reads the master key from:
++
+[source,bash]
+----
+cd ../litemaas-rhoai
+NS=litemaas
+LITELLM_MASTER_KEY=$(oc get secret litemaas-litellm -n ${NS} -o json \
+    | python3 -c "import json,sys,base64; d=json.load(sys.stdin)['data']; [print(base64.b64decode(v).decode()) for k,v in d.items() if 'master' in k.lower()]")
+LITELLM_URL="https://$(oc get route -n ${NS} -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' | grep -E '^litellm\.' | head -1)"
+
+# Find the internal LiteLLM model_id for this model name
+curl -sk "${LITELLM_URL}/model/info" -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
+    | python3 -c "import sys,json; [print(m['model_info']['id'], m['model_name']) for m in json.load(sys.stdin)['data']]"
+
+curl -sk -X POST "${LITELLM_URL}/model/delete" \
+    -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"id":"<model_id-from-above>"}'
+----
+--
+
+=== Worked example: fully remove one Compact MaaS-created model
+
+[source,bash]
+----
+NAME=granite-rhai
+NS=llm
+
+oc delete maassubscription ${NAME}-free -n models-as-a-service
+oc delete maasauthpolicy ${NAME}-access -n models-as-a-service
+oc delete maasmodelref ${NAME} -n ${NS}
+oc delete externalmodel ${NAME} -n ${NS}
+oc get httproute ${NAME} -n ${NS} && oc delete httproute ${NAME} -n ${NS}
+
+# Confirm no sibling ExternalModel shares the credential Secret before deleting it:
+oc get externalmodel -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" -> "}{.spec.credentialRef.name}{"\n"}{end}' \
+    | grep "${NAME}-credentials"
+oc delete secret ${NAME}-credentials -n ${NS}
+----
+
+=== Worked example: fully remove an endpoint imported with `import-external-models.sh --all`
+
+[source,bash]
+----
+NS=llm
+SECRET=us-east-rhai-ibm-com-credentials   # <endpoint-slug>-credentials, printed by the import script's "Credential Secret:" log line
+
+for NAME in granite-4-0-h-small granite-4-0-h-tiny; do
+    oc delete maassubscription ${NAME}-free -n models-as-a-service
+    oc delete maasauthpolicy ${NAME}-access -n models-as-a-service
+    oc delete maasmodelref ${NAME} -n ${NS}
+    oc delete externalmodel ${NAME} -n ${NS}
+    oc delete httproute ${NAME} -n ${NS} --ignore-not-found
+done
+
+# Only after every model on that endpoint is gone:
+oc get externalmodel -A -o jsonpath='{range .items[*]}{.spec.credentialRef.name}{"\n"}{end}' | grep -c "${SECRET}"
+# expect 0, then:
+oc delete secret ${SECRET} -n ${NS}
+----
 
 [[path-c]]
 == Path C — YAML / oc (guide manifests + custom OpenAI-compatible)
@@ -551,3 +705,4 @@ manifests/08-external-models/
 
 * xref:09-optional-guis.adoc[Optional GUIs] — Compact MaaS and/or LiteMaaS without local inference
 * xref:08-architecture.adoc[Architecture & Request Flow]
+* <<removing-an-external-model,Removing an external model>> — teardown checklist for API keys, subscriptions, model refs, and credential Secrets

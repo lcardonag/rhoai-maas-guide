@@ -139,6 +139,13 @@ moves on — it does not abort --all/--models. Re-running the same command later
 is always safe (every mutation is an idempotent oc apply/patch); pass --models
 with just the remaining ids to retry a subset.
 
+IMPORTANT: If a model NAME already exists in the target namespace, re-running
+against a DIFFERENT --endpoint/--path-prefix/--api-key UPDATES it in place
+(endpoint, path prefix, credential Secret) instead of skipping it — same name
+means one upstream, last writer wins. Use --name-prefix to keep two sources'
+models side by side, or --models with only the new ids to avoid touching
+existing names.
+
 Governance (MaaSAuthPolicy + MaaSSubscription):
   --skip-governance          Only create Secret + ExternalModel + MaaSModelRef.
                              Create AuthPolicy/Subscription (or a private Subscription)

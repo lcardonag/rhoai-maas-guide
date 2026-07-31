@@ -119,3 +119,9 @@ Unlike LiteMaaS, Compact MaaS sees models registered on native MaaS (Phase 5, or
 ----
 
 Open the printed route URLs, log in with OpenShift credentials, and confirm the model catalog matches your MaaS subscriptions.
+
+NOTE: That OpenShift login is for the **LiteMaaS** UI, not LiteLLM. The LiteLLM proxy underneath LiteMaaS has its own separate local `admin` account and master key (used for `wire-maas-models.sh` / `wire-all-ready-models.sh` and the LiteLLM proxy API) — see `litemaas-rhoai`'s docs/auth-notes.md, "Retrieving LiteLLM admin credentials".
+
+== Removing a model registered through a GUI
+
+Deleting an `ExternalModel` from Compact MaaS Admin (or via `oc`) does not automatically clean up a LiteMaaS/LiteLLM wiring of that same model — LiteLLM keeps a separate registry. See xref:08-external-models.adoc#removing-an-external-model[Removing an external model] for the full ordered teardown (governance CRs → model refs → HTTPRoute → credential Secret → LiteLLM entry).
