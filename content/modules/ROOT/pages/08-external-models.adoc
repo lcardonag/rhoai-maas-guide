@@ -23,6 +23,15 @@ IMPORTANT: Companion to the link:https://docs.redhat.com/en/documentation/red_ha
 
 | Compare proxy UX ($ / virtual keys)
 | Same external models + `--with-litemaas` (wires LiteLLM to gateway).
+
+| Register one model, prefer clicking through a form
+| <<path-a,Path A>> — Compact MaaS Admin GUI.
+
+| Register many models at once (bulk import, discover a provider's/remote gateway's full `/v1/models` catalog), or no Compact MaaS deployed
+| <<path-b,Path B>> — `scripts/import-external-models.sh`.
+
+| Full manual control, GitOps-style YAML, or scripting a single custom OpenAI-compatible host
+| <<path-c,Path C>> — `oc apply` against `manifests/08-external-models/`.
 |===
 
 NOTE: Phase 5 (local models) is *not* required for external-only. The older note that you need a local model first is obsolete for this path — you only need a programmed MaaS gateway and maas-api.
@@ -69,6 +78,7 @@ Important field meanings:
 . *MaaSAuthPolicy* — who may call the model on the gateway.
 . *MaaSSubscription* — who may mint API keys + Limitador token windows.
 
+[[path-a]]
 == Path A — Compact MaaS Admin (recommended for IBM / RHAI)
 
 Requires xref:09-optional-guis.adoc[Phase 10] (`--with-compact-maas`) and an admin in `maas-admins`.
@@ -134,7 +144,138 @@ curl --http1.1 -sS -w '\nhttp_code=%{http_code}\n' -X POST \
 
 TIP: After create, confirm rewrite: `oc get httproute granite-rhai -n llm -o yaml | grep -A6 URLRewrite` and annotation `compact-maas/upstream-path-prefix` on the ExternalModel.
 
-== Path B — YAML / oc (guide manifests + custom OpenAI-compatible)
+[[path-b]]
+== Path B — Bulk import script (discover `/v1/models`, no GUI)
+
+For providers that expose an OpenAI-compatible `/v1/models` listing, `scripts/import-external-models.sh` discovers every available model id and creates the *same* resources as Compact MaaS Admin's ExternalModel *Create* form — for one model or all of them — via plain `oc`. Useful when you don't want to click through the GUI once per model, or don't have Compact MaaS deployed at all. Works equally well against a stock provider (OpenAI) or against *another MaaS gateway* (e.g. a remote RHDP/workshop cluster) that fronts its own catalog behind an OpenAI-compatible `/v1/models`.
+
+It:
+
+. Calls `GET https://{endpoint}{path-prefix}/v1/models` with your API key (a path pasted into `--endpoint` is auto-detected as the path prefix).
+. Lists discovered model ids; select with `--all`, `--models id1,id2`, `--filter <regex>`, or an interactive prompt.
+. For each selected id: creates one *shared* credential Secret per endpoint (labels `inference.networking.k8s.io/bbr-managed=true` + `inference.networking.k8s.io/ipp-managed=true`), an `ExternalModel` (name sanitized from the model id), a `MaaSModelRef`, and — unless `--skip-governance` — an open `MaaSAuthPolicy` + `MaaSSubscription` (`system:authenticated`, 10k tokens/hour by default).
+. Heals the HTTPRoute `URLRewrite` for the catalog `/<namespace>/<name>` prefix, the same way Compact MaaS Admin does. External-model HTTPRoutes are created asynchronously by the MaaS controller, so the heal step polls (18 attempts, 5s apart ≈ 90s) instead of assuming the route exists immediately; if it never shows up in time, the script warns and *moves on to the next model* instead of aborting the whole `--all`/`--models` run.
+
+Every mutation is `oc apply` (or an idempotent `oc patch` for the HTTPRoute), so **re-running the same command is always safe** — already-created Secret/ExternalModel/MaaSModelRef/MaaSAuthPolicy/MaaSSubscription are simply reconciled to the same state, and the HTTPRoute heal short-circuits once it detects the desired `URLRewrite` is already in place.
+
+IMPORTANT: If the provider's base URL already ends in `/v1` (e.g. `https://host/v1`), pass the **host only** to `--endpoint` — do *not* also pass `/v1` (or `--path-prefix /v1`). The script always appends `/v1/models` itself, so `--endpoint host/v1` becomes `GET https://host/v1/v1/models` and 404s. Only use `--path-prefix` for a base path *before* `/v1` (e.g. IBM RHAI's `/v1/projects/<uuid>/inference`, which is followed by its own `/v1/...`).
+
+[source,bash]
+----
+# Stock OpenAI, register every model
+./scripts/import-external-models.sh --endpoint api.openai.com \
+    --api-key "$OPENAI_API_KEY" --all
+
+# IBM RHAI / project-prefixed host, pick specific models, Compact MaaS namespace
+./scripts/import-external-models.sh \
+    --endpoint us-east.rhai.ibm.com \
+    --path-prefix /v1/projects/<uuid>/inference \
+    --api-key "$RHAI_API_KEY" --namespace llm \
+    --models granite-4-0-h-small,granite-4-0-h-tiny
+
+# Remote MaaS gateway (e.g. an RHDP/workshop cluster) — host only, NOT /v1
+# --api-key here is the *remote* gateway's MaaS API key (sk-oai-...), not a local one.
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --list
+
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --all
+
+# Just see what's there, no changes
+./scripts/import-external-models.sh --endpoint api.openai.com --api-key "$OPENAI_API_KEY" --list
+
+# Preview every manifest without touching the cluster
+./scripts/import-external-models.sh --endpoint api.openai.com --api-key "$OPENAI_API_KEY" --all --dry-run
+----
+
+See `./scripts/import-external-models.sh --help` for the full option list (custom `--secret-name`, `--governance-namespace`, `--restricted`, `--token-limit`/`--token-window`, `--skip-namespace`, `--skip-route-heal`, `--no-wait`).
+
+=== Resuming a partial `--all` / `--models` run
+
+If the run stops partway (network blip, `Ctrl-C`, or the HTTPRoute heal gave up on one model after ~90s), just **re-run the exact same command**:
+
+[source,bash]
+----
+# Re-run --all: already-registered models are no-ops (oc apply is idempotent);
+# only the remaining/failed ones do real work.
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --all
+----
+
+To target only the models that didn't finish (skips re-discovery selection noise), diff what's registered against what was discovered and pass the remainder to `--models`:
+
+[source,bash]
+----
+oc get maasmodelref -n llm -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'   # already done
+./scripts/import-external-models.sh --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --list   # full discovered id list
+
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm \
+    --models model-id-3,model-id-4,model-id-5   # remaining ids only
+----
+
+If a specific HTTPRoute never healed (script gave up after ~90s), heal it manually once it appears, then re-run to confirm:
+
+[source,bash]
+----
+oc get httproute <name> -n llm -o yaml | grep -A6 URLRewrite
+# If missing, re-run the import command (heal_http_route is idempotent) or patch by hand — see <<urlrewrite>>.
+----
+
+NOTE: This script only registers models on the *native* MaaS gateway (`/llm/<name>/v1/...`). Wiring a separately-deployed LiteMaaS/LiteLLM PoC to those same models is a distinct, later, optional step — see below.
+
+[[after-import]]
+=== After import: Compact MaaS vs LiteMaaS
+
+`import-external-models.sh` (and Path A/C) only create resources on the *native* MaaS gateway: `ExternalModel` + `MaaSModelRef` + governance CRs in `llm` / `models-as-a-service`. What happens next depends on which optional GUI (xref:09-optional-guis.adoc[Phase 9–10]) you run:
+
+[cols="1,2,2"]
+|===
+| | *Compact MaaS* | *LiteMaaS / LiteLLM*
+
+| Sees the newly-registered model?
+| Immediately — same native MaaS catalog.
+| *No.* LiteLLM keeps its own separate model registry; it stays empty for these models until you explicitly wire them.
+
+| What you need to do
+| Nothing extra — Subscribe / browse as usual.
+| Mint a local MaaS API key per model, then run `wire-maas-models.sh` / `wire-all-ready-models.sh` in `litemaas-rhoai` (see below).
+|===
+
+==== Minting the local MaaS key LiteLLM needs
+
+Unless you passed `--skip-governance`, the import script created one open `<model>-free` `MaaSSubscription` **per model** — i.e. one subscription per model, not one shared subscription. To wire a model into LiteLLM you therefore mint **one local MaaS API key per model/subscription**:
+
+[source,bash]
+----
+# Mint a key scoped to one model's <model>-free subscription
+curl -sk -X POST "https://maas.<cluster-domain>/maas-api/v1/api-keys" \
+    -H "Authorization: Bearer $(oc whoami -t)" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"litemaas-wire-<model>","subscription":"<model>-free","expiresIn":"2160h"}'
+----
+
+`litemaas-rhoai/scripts/wire-all-ready-models.sh` does this minting for you — for every `Ready` `MaaSModelRef` in `llm` — and immediately registers each one in LiteLLM, so you don't have to juggle keys by hand:
+
+[source,bash]
+----
+cd ../litemaas-rhoai
+./scripts/wire-all-ready-models.sh
+----
+
+Prefer manual control over which models/keys get wired, or need to target an endpoint that isn't a `Ready` `MaaSModelRef` (e.g. a raw external provider)? Use `wire-maas-models.sh` instead (also triggered automatically via `MAAS_API_KEY` in xref:09-optional-guis.adoc[Phase 9]).
+
+IMPORTANT: The locally-minted MaaS key above is **LiteLLM's upstream credential** — what LiteLLM sends to the native MaaS gateway on your behalf. It is *not* what end users use. LiteMaaS end users authenticate with their own **LiteMaaS virtual keys** (LiteMaaS UI → API keys), which LiteLLM maps internally to the correct upstream MaaS key.
+
+CAUTION: Don't confuse that **local** MaaS key (minted against *this* cluster's gateway, used only for wiring into LiteLLM) with a **remote provider key** like `$REMOTE_MAAS_API_KEY` used earlier to `import-external-models.sh --endpoint maas-rhdp...` *from* a different cluster's MaaS gateway. They authenticate against two different gateways for two entirely different purposes.
+
+[[path-c]]
+== Path C — YAML / oc (guide manifests + custom OpenAI-compatible)
 
 === Skip local inference on a new cluster
 

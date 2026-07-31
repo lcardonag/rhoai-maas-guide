@@ -81,7 +81,7 @@ NOTE: This guide is Apache-2.0. Compact MaaS (`compact-maas` / `rhoai-maas-conso
 | Path to `litemaas-rhoai` (default `../litemaas-rhoai`)
 
 | `MAAS_API_KEY`
-| Optional. When set during Phase 9, runs `wire-maas-models.sh --discover-cluster --all`
+| Optional. When set during Phase 9, runs `wire-maas-models.sh --discover-cluster --all`. This key is *local* to this cluster's MaaS gateway — do not reuse a remote/other-cluster MaaS key here.
 
 | `MAAS_GATEWAY_URL`
 | Set automatically by Phase 10 for Compact MaaS Helm (`https://maas.<domain>`)
@@ -92,18 +92,22 @@ NOTE: This guide is Apache-2.0. Compact MaaS (`compact-maas` / `rhoai-maas-conso
 === Phase 9 — LiteMaaS
 
 . Calls `$LITEMAAS_RHOAI_DIR/scripts/install.sh` (Helm into `litemaas`).
-. If `MAAS_API_KEY` is set, wires LiteLLM backends to the cluster MaaS gateway.
+. If `MAAS_API_KEY` is set, wires LiteLLM backends to the cluster MaaS gateway (`wire-maas-models.sh --discover-cluster --all`).
 . Soft-verifies namespace/routes via `./scripts/verify-guis.sh --litemaas`.
+
+TIP: LiteMaaS starts with an **empty** model catalog even if models are already registered on native MaaS (Phase 5 or xref:08-external-models.adoc#after-import[Phase 8's import script]) — LiteLLM keeps its own registry. Wire them explicitly with `MAAS_API_KEY` above, or later via `litemaas-rhoai/scripts/wire-all-ready-models.sh` (mints one local MaaS key per `Ready` model and registers it in LiteLLM in one pass) or `wire-maas-models.sh`. See xref:08-external-models.adoc#after-import[Compact MaaS vs LiteMaaS after import].
 
 See `manifests/09-litemaas/README.md`.
 
 === Phase 10 — Compact MaaS
 
 . Runs `$COMPACT_MAAS_DIR/scripts/apply-phase2-rbac.sh` (maas-admins) when present.
-. Runs `$COMPACT_MAAS_DIR/scripts/deploy.sh` with `MAAS_GATEWAY_URL=https://maas.<domain>`.
+. Runs `$COMPACT_MAAS_DIR/scripts/deploy.sh` with `MAAS_GATEWAY_URL=https://maas.<domain>`. `deploy.sh` also applies the Phase 3 self-subscribe enrollment RBAC (`console-enroll.yaml`) automatically, so end-user **Subscribe** works without a separate manual RBAC step.
 . Soft-verifies via `./scripts/verify-guis.sh --compact-maas`.
 
 See `manifests/10-compact-maas/README.md`.
+
+Unlike LiteMaaS, Compact MaaS sees models registered on native MaaS (Phase 5, or xref:08-external-models.adoc#after-import[Phase 8's import script]) immediately — it browses the same catalog, no wiring step needed.
 
 == Manual verify
 

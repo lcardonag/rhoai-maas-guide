@@ -91,6 +91,12 @@ External-only (no local inference servers) + Compact MaaS:
 # Then add OpenAI / IBM RHAI ExternalModels — see Phase 8 docs
 ```
 
+Bulk-register external models (discover a provider's or remote MaaS gateway's `/v1/models` and create them all, no GUI required — see [Phase 8](content/modules/ROOT/pages/08-external-models.adoc#path-b)):
+
+```bash
+./scripts/import-external-models.sh --endpoint api.openai.com --api-key "$OPENAI_API_KEY" --namespace llm --all
+```
+
 ## Available Models
 
 | Model | GPU Required | VRAM | Use Case |

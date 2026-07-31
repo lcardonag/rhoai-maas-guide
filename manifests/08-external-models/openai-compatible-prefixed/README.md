@@ -6,7 +6,7 @@ Templates for external models whose OpenAI routes live under a **project base pa
 https://us-east.rhai.ibm.com/v1/projects/<uuid>/inference/v1/chat/completions
 ```
 
-Replace placeholders before apply. Prefer **Compact MaaS → Admin → Model refs → ExternalModel** (Test connection + automatic URLRewrite). These YAMLs are for GitOps / `oc` operators.
+Replace placeholders before apply. Prefer **Compact MaaS → Admin → Model refs → ExternalModel** (Test connection + automatic URLRewrite), or `scripts/import-external-models.sh --path-prefix /v1/projects/<uuid>/inference ...` to bulk-register every model the project exposes without templating each file by hand. These YAMLs are for GitOps / `oc` operators.
 
 ## Placeholders
 
