@@ -144,6 +144,8 @@ curl --http1.1 -sS -w '\nhttp_code=%{http_code}\n' -X POST \
 
 TIP: After create, confirm rewrite: `oc get httproute granite-rhai -n llm -o yaml | grep -A6 URLRewrite` and annotation `compact-maas/upstream-path-prefix` on the ExternalModel.
 
+IMPORTANT: HTTPRoute `URLRewrite` alone is *not* enough for IBM RHAI. BBR/payload-processing normalizes the upstream path to `/v1/chat/completions` and drops `/v1/projects/<uuid>/inference`. Apply the durable EnvoyFilter in <<ibm-rhai-envoyfilter>> (required for Compact MaaS Admin *and* bulk import).
+
 [[path-b]]
 == Path B — Bulk import script (discover `/v1/models`, no GUI)
 
@@ -174,6 +176,9 @@ IMPORTANT: If the provider's base URL already ends in `/v1` (e.g. `https://host/
     --path-prefix /v1/projects/<uuid>/inference \
     --api-key "$RHAI_API_KEY" --namespace llm \
     --models granite-4-0-h-small,granite-4-0-h-tiny
+
+# After any IBM RHAI import, apply the path-prefix EnvoyFilter (see <<ibm-rhai-envoyfilter>>):
+# oc apply -f manifests/08-external-models/openai-compatible-prefixed/ibm-rhai-upstream-path-prefix-envoyfilter.yaml
 
 # Remote MaaS gateway (e.g. an RHDP/workshop cluster) — host only, NOT /v1
 # --api-key here is the *remote* gateway's MaaS API key (sk-oai-...), not a local one.
@@ -541,7 +546,43 @@ After ModelRef is Ready and HTTPRoute exists:
 oc get httproute granite-rhai -n llm -o yaml
 ----
 
-If inference returns `404 {"detail":"Not Found"}`, the rewrite is wrong or missing.
+If inference returns `404 {"detail":"Not Found"}`, the HTTPRoute rewrite may be wrong or missing — but an *empty* 404 body with a valid MaaS key usually means BBR dropped the IBM project prefix (see <<ibm-rhai-envoyfilter>>).
+
+[[ibm-rhai-envoyfilter]]
+==== IBM RHAI: durable upstream path prefix (EnvoyFilter)
+
+*Symptom:* Direct IBM `curl` with the IBM API key works. The same request through the MaaS gateway with a `*-free` subscription key returns an empty *404* (no useful body). Prefer `--http1.1` when testing.
+
+*Root cause:* BBR/payload-processing rewrites `:path` to `/v1/chat/completions`, dropping `/v1/projects/<uuid>/inference`. Gateway API `URLRewrite` alone cannot restore it. `RequestHeaderModifier` Host / `x-ibm-rhai-prefix` patches are applied at *router* time, so a Lua filter after `ext_proc.bbr` must *not* rely on those headers.
+
+*Fix:* EnvoyFilter `ibm-rhai-upstream-path-prefix` in `openshift-ingress`, targeting Gateway `maas-default-gateway`. Lua inserted *after* `ext_proc.bbr` detects IBM models via `routeName` / `X-Gateway-Model-Name` / original path `/llm/<model>/`, then sets `:path` to `prefix + "/" + rest`.
+
+[source,bash]
+----
+oc apply -f manifests/08-external-models/openai-compatible-prefixed/ibm-rhai-upstream-path-prefix-envoyfilter.yaml
+# Restart the maas-default-gateway Envoy pod in openshift-ingress if the filter does not attach immediately
+----
+
+Edit the Lua `prefix` (project UUID) and `models` list in that manifest before apply when your IBM project or catalog differs.
+
+*Test* (MaaS subscription key for a `*-free` sub — *not* the IBM key):
+
+[source,bash]
+----
+curl --http1.1 -skS -X POST \
+  "https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')/llm/llama-3-3-70b-instruct/v1/chat/completions" \
+  -H "Authorization: Bearer $MAAS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama-3-3-70b-instruct","messages":[{"role":"user","content":"Say hi"}],"max_tokens":16}'
+----
+
+NOTE: IBM may respond with HTTP *202* while still returning completed `choices` — treat that as success.
+
+*Caveats:*
+
+* Model ids and project UUID are hardcoded in the Lua — new IBM models need an EnvoyFilter update.
+* The MaaS reconciler may overwrite HTTPRoute header patches; this EnvoyFilter is the durable fix.
+* Import / Compact MaaS still use `--path-prefix` / `compact-maas/upstream-path-prefix` for discovery and URLRewrite heal; keep that annotation, and *also* apply this filter.
 
 == Step-by-step: stock OpenAI (manifests)
 
@@ -673,9 +714,13 @@ Manifests: `manifests/08-external-models/bedrock/`. Use Mantle host `bedrock-man
 
 See <<google-gemini>>.
 
+=== IBM RHAI empty 404 (BBR drops project path prefix)
+
+Direct IBM calls succeed; gateway calls with a MaaS key return empty 404. BBR normalizes to `/v1/chat/completions` and drops `/v1/projects/<uuid>/inference`. Apply <<ibm-rhai-envoyfilter>>. Do not expect Host/`x-ibm-rhai-prefix` HTTPRoute patches alone to fix it after BBR.
+
 === Wrong field for IBM project URL
 
-Putting `https://…/v1/projects/…/inference/` in *Endpoint override* does nothing for upstream routing. Use FQDN + *Upstream path prefix* (Compact MaaS) or the annotation + URLRewrite (YAML).
+Putting `https://…/v1/projects/…/inference/` in *Endpoint override* does nothing for upstream routing. Use FQDN + *Upstream path prefix* (Compact MaaS) or the annotation + URLRewrite (YAML), *plus* <<ibm-rhai-envoyfilter>> for inference.
 
 == Appendix
 
@@ -685,7 +730,7 @@ Putting `https://…/v1/projects/…/inference/` in *Endpoint override* does not
 ----
 manifests/08-external-models/
   openai/ ... gemini/ ... bedrock/
-  openai-compatible-prefixed/   # IBM RHAI-style templates (placeholders)
+  openai-compatible-prefixed/   # IBM RHAI-style templates + ibm-rhai-upstream-path-prefix EnvoyFilter
 ----
 
 === Supported ExternalModel providers (BBR)
