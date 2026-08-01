@@ -7,7 +7,7 @@ https://us-east.rhai.ibm.com/v1/projects/<uuid>/inference/v1/chat/completions
 ```
 
 `ExternalModel.spec.endpoint` is FQDN-only. Put the project base path in annotation
-`compact-maas/upstream-path-prefix` and heal HTTPRoute `URLRewrite` to that prefix.
+`compact-maas/upstream-path-prefix` and heal HTTPRoute `URLRewrite` plus `x-ibm-rhai-prefix` on all rules (BBR often matches the header-match rule, not PathPrefix).
 
 Replace placeholders before apply. Prefer **Compact MaaS → Admin → Model refs → ExternalModel** (Test connection + automatic URLRewrite), or `scripts/import-external-models.sh --path-prefix /v1/projects/<uuid>/inference ...` to bulk-register every model the project exposes without templating each file by hand. These YAMLs are for GitOps / `oc` operators.
 

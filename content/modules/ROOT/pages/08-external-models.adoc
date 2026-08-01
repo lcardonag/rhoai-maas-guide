@@ -553,9 +553,12 @@ If inference returns `404 {"detail":"Not Found"}`, the HTTPRoute rewrite may be 
 
 *Symptom:* Direct IBM `curl` with the IBM API key works. The same request through the MaaS gateway with a `*-free` subscription key returns an empty *404* (no useful body). Prefer `--http1.1` when testing.
 
-*Root cause:* BBR/payload-processing rewrites `:path` to `/v1/chat/completions`, dropping `/v1/projects/<uuid>/inference`. Gateway API `URLRewrite` alone cannot restore it. `RequestHeaderModifier` Host / `x-ibm-rhai-prefix` patches are applied at *router* time, so a Lua filter after `ext_proc.bbr` must *not* rely on those headers.
+*Root cause:* BBR/payload-processing rewrites `:path` to `/v1/chat/completions`, dropping `/v1/projects/<uuid>/inference`. That stripped path also means Envoy matches the HTTPRoute *header* rule (`X-Gateway-Model-Name`), not the `/llm/<model>` PathPrefix rule that carries `URLRewrite` — so rule-1 rewrite alone never runs for typical BBR traffic. Gateway API `URLRewrite` cannot restore the project prefix after BBR. `RequestHeaderModifier` Host / `x-ibm-rhai-prefix` patches are applied at *router* time, so a Lua filter after `ext_proc.bbr` must *not* rely on those headers alone.
 
-*Fix:* EnvoyFilter `ibm-rhai-upstream-path-prefix` in `openshift-ingress`, targeting Gateway `maas-default-gateway`. Lua inserted *after* `ext_proc.bbr` detects IBM models via `routeName` / `X-Gateway-Model-Name` / original path `/llm/<model>/`, then sets `:path` to `prefix + "/" + rest`.
+*Fix (two layers):*
+
+* *Compact MaaS / import heal:* when `compact-maas/upstream-path-prefix` is set, ensure `x-ibm-rhai-prefix` on *all* HTTPRoute rules (including the BBR header-match rule) plus `URLRewrite` on the `/llm/<name>` rule — needed for api-translation and as a signal when the header is still visible.
+* *Durable:* EnvoyFilter `ibm-rhai-upstream-path-prefix` in `openshift-ingress`, targeting Gateway `maas-default-gateway`. Lua inserted *after* `ext_proc.bbr` detects IBM models via `routeName` / `X-Gateway-Model-Name` / original path `/llm/<model>/`, then sets `:path` to `prefix + "/" + rest`. Treat the EnvoyFilter as belt-and-suspenders when BBR normalizes the path.
 
 [source,bash]
 ----
@@ -581,8 +584,8 @@ NOTE: IBM may respond with HTTP *202* while still returning completed `choices` 
 *Caveats:*
 
 * Model ids and project UUID are hardcoded in the Lua — new IBM models need an EnvoyFilter update.
-* The MaaS reconciler may overwrite HTTPRoute header patches; this EnvoyFilter is the durable fix.
-* Import / Compact MaaS still use `--path-prefix` / `compact-maas/upstream-path-prefix` for discovery and URLRewrite heal; keep that annotation, and *also* apply this filter.
+* The MaaS external-model reconciler may overwrite HTTPRoute header/URLRewrite patches; Compact MaaS Admin list/get and import `--path-prefix` re-heal `URLRewrite` + `x-ibm-rhai-prefix` on all rules. This EnvoyFilter remains the durable post-BBR fix.
+* Import / Compact MaaS still use `--path-prefix` / `compact-maas/upstream-path-prefix` for discovery and route heal; keep that annotation, and *also* apply this filter.
 
 == Step-by-step: stock OpenAI (manifests)
 
@@ -716,7 +719,7 @@ See <<google-gemini>>.
 
 === IBM RHAI empty 404 (BBR drops project path prefix)
 
-Direct IBM calls succeed; gateway calls with a MaaS key return empty 404. BBR normalizes to `/v1/chat/completions` and drops `/v1/projects/<uuid>/inference`. Apply <<ibm-rhai-envoyfilter>>. Do not expect Host/`x-ibm-rhai-prefix` HTTPRoute patches alone to fix it after BBR.
+Direct IBM calls succeed; gateway calls with a MaaS key return empty 404. BBR normalizes to `/v1/chat/completions` (matching the header-match HTTPRoute rule) and drops `/v1/projects/<uuid>/inference`. Compact MaaS/import should set `x-ibm-rhai-prefix` on all rules; still apply <<ibm-rhai-envoyfilter>> — do not expect Host/`x-ibm-rhai-prefix` HTTPRoute patches alone to fix it after BBR.
 
 === Wrong field for IBM project URL
 

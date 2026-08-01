@@ -663,7 +663,7 @@ apply_secret() {
 }
 
 # -----------------------------------------------------------------------------
-# HTTPRoute URLRewrite heal (mirrors compact-maas httproute-rewrite.ts)
+# HTTPRoute URLRewrite + x-ibm-rhai-prefix heal (mirrors compact-maas httproute-rewrite.ts)
 # -----------------------------------------------------------------------------
 # The patch-computation script is invoked with `python3 -c "$HEAL_PATCH_PY" ...`
 # (script passed as an argv string), NOT `python3 - <<HEREDOC`. That distinction
@@ -674,15 +674,19 @@ apply_secret() {
 # (char 0)", regardless of what the route actually looks like on the cluster.
 # `-c` avoids this: the script text is an argument, so stdin stays free for the
 # piped route JSON.
+#
+# When target_prefix is project-scoped (not "/"), also set x-ibm-rhai-prefix on
+# every rule — BBR strips /llm/<model> so traffic matches the header-match rule.
 HEAL_PATCH_PY=$(cat <<'PY'
-import json, sys
+import json, sys, copy
 namespace, name, target_prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+IBM_HDR = 'x-ibm-rhai-prefix'
 try:
     route = json.load(sys.stdin)
 except Exception as e:
     print('__PARSE_ERROR__ ' + str(e))
     sys.exit(0)
-want_path = f"/{namespace}/{name}"
+want_path = f"/llm/{name}"
 rules = (route.get('spec') or {}).get('rules') or []
 rule_idx = -1
 for i, rule in enumerate(rules):
@@ -697,31 +701,94 @@ if rule_idx < 0:
     print('NO_RULE')
     sys.exit(0)
 
-filters = rules[rule_idx].get('filters')
-desired = {
-    'type': 'URLRewrite',
-    'urlRewrite': {'path': {'type': 'ReplacePrefixMatch', 'replacePrefixMatch': target_prefix}},
-}
+need_ibm = bool(target_prefix) and target_prefix != '/'
 
-def is_desired(f):
-    if not isinstance(f, dict) or f.get('type') != 'URLRewrite':
+def has_desired_rewrite(filters):
+    if not isinstance(filters, list):
         return False
-    path = (f.get('urlRewrite') or {}).get('path') or {}
-    return path.get('type') == 'ReplacePrefixMatch' and path.get('replacePrefixMatch') == target_prefix
+    for f in filters:
+        if not isinstance(f, dict) or f.get('type') != 'URLRewrite':
+            continue
+        path = (f.get('urlRewrite') or {}).get('path') or {}
+        if path.get('type') == 'ReplacePrefixMatch' and path.get('replacePrefixMatch') == target_prefix:
+            return True
+    return False
 
-if isinstance(filters, list) and any(is_desired(f) for f in filters):
+def has_ibm_prefix(filters):
+    if not isinstance(filters, list):
+        return False
+    for f in filters:
+        if not isinstance(f, dict) or f.get('type') != 'RequestHeaderModifier':
+            continue
+        for h in ((f.get('requestHeaderModifier') or {}).get('set') or []):
+            if isinstance(h, dict) and (h.get('name') or '').lower() == IBM_HDR and h.get('value') == target_prefix:
+                return True
+    return False
+
+def with_rewrite(filters):
+    out = list(filters) if isinstance(filters, list) else []
+    desired = {
+        'type': 'URLRewrite',
+        'urlRewrite': {'path': {'type': 'ReplacePrefixMatch', 'replacePrefixMatch': target_prefix}},
+    }
+    if has_desired_rewrite(out):
+        return out
+    for i, f in enumerate(out):
+        if isinstance(f, dict) and f.get('type') == 'URLRewrite':
+            out[i] = desired
+            return out
+    out.insert(0, desired)
+    return out
+
+def with_ibm_prefix(filters):
+    out = copy.deepcopy(filters) if isinstance(filters, list) else []
+    for i, f in enumerate(out):
+        if not isinstance(f, dict) or f.get('type') != 'RequestHeaderModifier':
+            continue
+        rhm = dict(f.get('requestHeaderModifier') or {})
+        sett = list(rhm.get('set') or [])
+        found = False
+        for j, h in enumerate(sett):
+            if isinstance(h, dict) and (h.get('name') or '').lower() == IBM_HDR:
+                sett[j] = {'name': IBM_HDR, 'value': target_prefix}
+                found = True
+                break
+        if not found:
+            sett.append({'name': IBM_HDR, 'value': target_prefix})
+        rhm['set'] = sett
+        out[i] = {**f, 'type': 'RequestHeaderModifier', 'requestHeaderModifier': rhm}
+        return out
+    out.append({
+        'type': 'RequestHeaderModifier',
+        'requestHeaderModifier': {'set': [{'name': IBM_HDR, 'value': target_prefix}]},
+    })
+    return out
+
+working = []
+changed = False
+for i, rule in enumerate(rules):
+    filters = rule.get('filters')
+    next_filters = list(filters) if isinstance(filters, list) else []
+    if i == rule_idx:
+        next_filters = with_rewrite(next_filters)
+    if need_ibm:
+        next_filters = with_ibm_prefix(next_filters)
+    if json.dumps(filters if isinstance(filters, list) else []) != json.dumps(next_filters):
+        changed = True
+    working.append((i, filters, next_filters))
+
+if not changed:
     print('ALREADY')
     sys.exit(0)
 
 patch = []
-if not isinstance(filters, list):
-    patch.append({'op': 'add', 'path': f'/spec/rules/{rule_idx}/filters', 'value': [desired]})
-else:
-    rewrite_idx = next((i for i, f in enumerate(filters) if isinstance(f, dict) and f.get('type') == 'URLRewrite'), -1)
-    if rewrite_idx >= 0:
-        patch.append({'op': 'replace', 'path': f'/spec/rules/{rule_idx}/filters/{rewrite_idx}', 'value': desired})
+for i, original, desired in working:
+    if json.dumps(original if isinstance(original, list) else []) == json.dumps(desired):
+        continue
+    if not isinstance(original, list):
+        patch.append({'op': 'add', 'path': f'/spec/rules/{i}/filters', 'value': desired})
     else:
-        patch.append({'op': 'add', 'path': f'/spec/rules/{rule_idx}/filters/0', 'value': desired})
+        patch.append({'op': 'replace', 'path': f'/spec/rules/{i}/filters', 'value': desired})
 print(json.dumps(patch))
 PY
 )
@@ -765,11 +832,11 @@ heal_http_route() {
             last_err="$(cat "$err_file")"
             case "$patch" in
                 ALREADY)
-                    log_info "HTTPRoute ${name} already has the desired URLRewrite"
+                    log_info "HTTPRoute ${name} already has the desired URLRewrite${target_prefix:+/x-ibm-rhai-prefix}"
                     return 0
                     ;;
                 NO_RULE)
-                    log_warn "HTTPRoute ${name} has no PathPrefix /${NAMESPACE}/${name} rule yet (still reconciling)"
+                    log_warn "HTTPRoute ${name} has no PathPrefix /llm/${name} rule yet (still reconciling)"
                     ;;
                 __PARSE_ERROR__*|__CMD_ERROR__|"")
                     fail_attempts=$((fail_attempts + 1))
@@ -778,7 +845,7 @@ heal_http_route() {
                     ;;
                 *)
                     if oc patch "${gvk}/${name}" -n "$NAMESPACE" --type=json -p "$patch" >"$err_file" 2>&1; then
-                        log_info "HTTPRoute ${name} URLRewrite -> ${target_prefix} applied"
+                        log_info "HTTPRoute ${name} route heal -> ${target_prefix} applied (URLRewrite + x-ibm-rhai-prefix when prefixed)"
                         return 0
                     fi
                     fail_attempts=$((fail_attempts + 1))
