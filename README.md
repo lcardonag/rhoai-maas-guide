@@ -1,122 +1,175 @@
 # RHOAI Models-as-a-Service (MaaS) Guide
 
-Guide to deploy RHOAI 3.4 Models-as-a-Service on OpenShift.
+Companion guide to deploy **Red Hat OpenShift AI (RHOAI) Models-as-a-Service** on OpenShift using Kustomize manifests and automation scripts.
 
 - Kustomize manifests with status gates between every phase
-- Single automation script for end-to-end deployment
-- CPU-only simulator model for validation without GPUs
+- Single automation script for end-to-end deployment (`setup-maas.sh`)
+- CPU-only **simulator** model for validation without GPUs
+- **Local docs:** [Phase 8 — External Models](docs/08-external-models.md) (Markdown; full IBM RHAI / OpenAI / troubleshooting detail)
+
+**Targets RHOAI 3.4** per the [official MaaS docs](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index). This fork has been exercised on **RHOAI 3.5** (dashboard nav, `maas-api` in `redhat-ai-gateway-infra`, gateway memory fixes). Treat 3.5 as supported-with-notes, not a separate product guide.
 
 Requires OpenShift 4.19+ with cluster-admin access.
 
-> **Note:** This guide is not a replacement for the [official RHOAI 3.4 Models-as-a-Service documentation](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index). It is a companion resource with opinionated Kustomize manifests and automation scripts to accelerate deployment.
+> **Note:** This is not a replacement for Red Hat’s official documentation. It is an opinionated companion with manifests, scripts, and field notes from real cluster installs.
 
-**Full documentation:** https://rh-aiservices-bu.github.io/rhoai-maas-guide/
-**GitHub Repository** https://github.com/rh-aiservices-bu/rhoai-maas-guide
+**Published guide:** https://rh-aiservices-bu.github.io/rhoai-maas-guide/  
+**Upstream repo:** https://github.com/rh-aiservices-bu/rhoai-maas-guide
+
+## How this fork differs from upstream
+
+| Area | Upstream focus | This guide adds |
+|------|----------------|-----------------|
+| **Lifecycle** | Often reads as “run script → model included” | **Phases 1–4 = platform only**; models are a separate step (Phase 5, GUI, or manual register) |
+| **Phase 5** | Auto-deploy one model | Only **`simulator`**, **`granite-tiny-gpu`**, **`gpt-oss-20b`**; **skips** if any `LLMInferenceService` exists |
+| **GUI models** | Light coverage | **Publish as MaaS** timing, RHOAI **3.5** nav, **register existing GUI model** workflow |
+| **Gateways** | `maas-default-gateway` OOM fix | **All three** ingress gateways need **2Gi** proxy memory; script applies TLS + memory fixes |
+| **Phase 8** | AsciiDoc in Antora | **[docs/](docs/)** — canonical Markdown (Phase 8 started the pattern; all phases now in `docs/`) |
+| **Script** | Phases 0–6 | RHOAI **3.5** DSC/dashboard patches, duplicate OperatorGroup guard, gateway helpers |
 
 ## Phases
 
-Each phase has step-by-step instructions, status gates, and troubleshooting.
+Each phase has step-by-step instructions, status gates, and troubleshooting in [`docs/`](docs/).
 
-### Installation Guide
-
-| Phase | Description | Time |
-|-------|-------------|------|
-| [1. Prerequisites](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/01-prerequisites.html) | Operator subscriptions (RHOAI, RHCL, cert-manager, LWS) | 5-10 min |
-| [2. Platform Configuration](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/02-platform-config.html) | Kuadrant/Authorino, User Workload Monitoring, GatewayClass, Gateway | 5-10 min |
-| [3. MaaS Platform](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/03-maas-platform.html) | PostgreSQL database and secrets | 5 min |
-| [4. RHOAI Configuration](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/04-rhoai-config.html) | DataScienceCluster, DSCInitialization, Dashboard settings | 5-10 min |
-
-### Model Deployment & Verification
+### Installation (platform)
 
 | Phase | Description | Time |
 |-------|-------------|------|
-| [5. Model Deployment](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/05-maas-models.html) | Deploy and register LLM models with MaaS | 1-15 min |
-| [6. Verification](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/06-verification.html) | End-to-end checks (API keys, inference, rate limiting) | 5 min |
-| [8. External Models](content/modules/ROOT/pages/08-external-models.adoc) *(optional)* | OpenAI-compatible SaaS / IBM RHAI — **no local inference** | 5-15 min |
+| [1. Prerequisites](docs/01-prerequisites.md) | Operators (RHOAI, RHCL, cert-manager, LWS) | 5–10 min |
+| [2. Platform Configuration](docs/02-platform-config.md) | Kuadrant/Authorino, UWM, GatewayClass, MaaS gateway (**2Gi** proxy memory) | 5–10 min |
+| [3. MaaS Platform](docs/03-maas-platform.md) | PostgreSQL and secrets | ~5 min |
+| [4. RHOAI Configuration](docs/04-rhoai-config.md) | DSC `modelsAsService: Managed`, dashboard flags, wait for `maas-api` | 5–10 min |
 
-### Observability
+### Models & verification
 
 | Phase | Description | Time |
 |-------|-------------|------|
-| [7. Observability](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/07-observability.html) *(optional)* | COO subscription + Gateway telemetry dashboards | 5 min |
+| [5. Model Deployment](docs/05-maas-models.md) | Bundled models **or** GUI / manual MaaS registration | 1–15 min |
+| [6. Verification](docs/06-verification.md) | API keys, inference, rate limits (`verify.sh`) | ~5 min |
+| [8. External Models](docs/08-external-models.md) *(optional)* | OpenAI-compatible / IBM RHAI — **no local inference** | 5–15 min |
 
-### Optional GUIs
+### Optional
 
-| Phase | Description | Flag |
-|-------|-------------|------|
-| 9. LiteMaaS + LiteLLM | PoC GUI with LiteLLM proxy (`litemaas` ns) | `--with-litemaas` |
-| 10. Compact MaaS | Thin native MaaS UI/BFF, **no LiteLLM** (`compact-maas` ns) | `--with-compact-maas` |
+| Phase | Description |
+|-------|-------------|
+| [7. Observability](docs/07-observability.md) | COO + gateway telemetry (`--with-observability`) |
+| [9–10. GUIs](docs/09-optional-guis.md) | Compact MaaS (`--with-compact-maas`) or LiteMaaS (`--with-litemaas`) |
 
-Both GUIs are independent and can coexist. **Recommended product path:** Compact MaaS. LiteMaaS is for PoC / proxy features ($ budgets, virtual keys). See [Optional GUIs](content/modules/ROOT/pages/09-optional-guis.adoc).
+## Automated setup
 
-Sibling checkouts (or set env):
-
-| Env | Default |
-|-----|---------|
-| `LITEMAAS_RHOAI_DIR` | `../litemaas-rhoai` |
-| `COMPACT_MAAS_DIR` | `../compact-maas` (falls back to `../rhoai-maas-console`) |
-
-## Automated Setup
-
-A single script runs all phases end-to-end. Each phase is idempotent - re-running skips what is already done.
+Phases are idempotent — re-running skips completed work.
 
 ```bash
+# Platform + bundled model + verification (default)
 ./scripts/setup-maas.sh
-```
 
-Resume from a specific phase after a failure:
+# Platform only — use before GUI deploy or custom catalog models (e.g. Gemma)
+./scripts/setup-maas.sh --skip-models
 
-```bash
+# Resume after failure
 ./scripts/setup-maas.sh --from-phase 4
 ```
 
-With observability (Cluster Observability Operator + Gateway telemetry):
+Common flags: `--model simulator|granite-tiny-gpu|gpt-oss-20b|auto`, `--skip-verify`, `--with-observability`, `--with-compact-maas`, `--with-litemaas`, `--dry-run`. See [quick-start](docs/quick-start.md).
+
+**Script helpers (Phases 2 & 4):** syncs `default-gateway-tls` for external inference, applies **2Gi** Istio proxy limits on `maas-default-gateway`, `data-science-gateway`, and `openshift-ai-inference` (see `manifests/02-platform-config/`).
+
+## Choosing a model deployment path
+
+Phases **1–4** install the MaaS **platform** only. A model appears in the catalog after **registration** (Phase 5, **Publish as MaaS**, or manual YAML).
+
+| Path | When to use | Action |
+|------|-------------|--------|
+| **A — Full script** | Quick validation with a bundled model | `./scripts/setup-maas.sh` or `--model simulator` |
+| **B — Script + GUI** | Custom catalog model (e.g. Gemma) on GPU | `./scripts/setup-maas.sh --skip-models` → deploy in dashboard with **Publish as MaaS** |
+| **C — Register existing** | Model deployed before MaaS was ready | Label namespace, patch gateway, apply `MaaSModelRef` / policy / subscription — [Phase 5 § Register existing](docs/05-maas-models.md#register-existing-gui-model) |
+| **D — External only** | No in-cluster GPU | `./scripts/setup-maas.sh --skip-models` → [Phase 8](docs/08-external-models.md) |
+
+**GUI order:** deploy models **after** `maas-api` is healthy (`curl -sk https://maas.<domain>/maas-api/health`). Deploying earlier yields inference-only on `inference-gateway` (OpenShift token), not MaaS API keys.
+
+**Phase 5 skip:** if *any* `LLMInferenceService` exists cluster-wide, Phase 5 is skipped — it does **not** auto-register existing GUI models.
+
+**Subscriptions:** Phase 5 and **Publish as MaaS** create `MaaSSubscription` + `MaaSAuthPolicy`. Default tier allows `system:authenticated` (any logged-in user can mint `*-free` keys).
+
+### RHOAI 3.5 dashboard
+
+Under **Gen AI Studio**:
+
+- **AI asset endpoints → Models** — deployed models; MaaS-published models show a **Model as a Service** badge (one model may list two URL forms — namespace path and `publishers/…/models/…` — that is normal).
+- **API keys** — sibling menu item (not inside AI asset endpoints).
+
+## Test inference with a MaaS API key
 
 ```bash
-./scripts/setup-maas.sh --with-observability
+CLUSTER_DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
+MAAS_URL="https://maas.${CLUSTER_DOMAIN}"
+
+API_KEY=$(curl -sk -X POST "${MAAS_URL}/maas-api/v1/api-keys" \
+  -H "Authorization: Bearer $(oc whoami -t)" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test","subscription":"<your-subscription>","expiresIn":"1h"}' \
+  | jq -r '.key')
+
+MODEL_ID=$(curl -sk "${MAAS_URL}/v1/models" \
+  -H "Authorization: Bearer ${API_KEY}" | jq -r '.data[0].id')
+
+curl -sk "${MAAS_URL}/v1/chat/completions" \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":50}"
 ```
 
-Optional GUIs (after MaaS is up, or in the same run):
+Use `.key` (not `.token`). List models at `/v1/models`; infer at `/v1/chat/completions` with the `id` from the listing. Subscription name must match a `MaaSSubscription` (e.g. `redhataigemma-4-e4b-it-free` for a manually registered Gemma).
+
+Helper: `./scripts/test-inference.sh --base-url "${MAAS_URL}" --api-key "${API_KEY}" --model "${MODEL_ID}"`
+
+## Bundled models (Phase 5 only)
+
+| Model | GPU | VRAM | Use case |
+|-------|-----|------|----------|
+| `simulator` | No | — | CPU validation |
+| `granite-tiny-gpu` | Yes | &lt; 40 GiB | T4, L4, A10 |
+| `gpt-oss-20b` | Yes | ≥ 40 GiB | L40S, A100, H100 |
+
+## External models
 
 ```bash
-./scripts/setup-maas.sh --with-compact-maas
-./scripts/setup-maas.sh --with-litemaas
-./scripts/setup-maas.sh --with-compact-maas --with-litemaas
+./scripts/setup-maas.sh --skip-models --with-compact-maas   # optional GUI
+
+./scripts/import-external-models.sh \
+  --endpoint api.openai.com --api-key "$OPENAI_API_KEY" \
+  --namespace llm --all
 ```
 
-External-only (no local inference servers) + Compact MaaS:
+Details: [docs/08-external-models.md](docs/08-external-models.md).
 
-```bash
-./scripts/setup-maas.sh --skip-models --with-compact-maas
-# Then add OpenAI / IBM RHAI ExternalModels — see Phase 8 docs
-```
+## Troubleshooting (quick)
 
-Bulk-register external models (discover a provider's or remote MaaS gateway's `/v1/models` and create them all, no GUI required — see [Phase 8](content/modules/ROOT/pages/08-external-models.adoc#path-b)):
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Gateway pods `CrashLoopBackOff` / `OOMKilled` | 1Gi Istio proxy limit | Re-run `./scripts/setup-maas.sh --from-phase 4` or [Phase 2 gateway memory](docs/02-platform-config.md) |
+| External inference TLS / listener not programmed | Missing `default-gateway-tls` | Script `ensure_default_gateway_tls()`; see Phase 2 |
+| No **Publish as MaaS** in GUI | Model deployed before MaaS ready | Path **C** or redeploy after `--skip-models` |
+| API key works for `/v1/models`, inference `401` | ext-proc / payload-processing on gateway | See [Phase 5 troubleshooting](docs/05-maas-models.md); open Red Hat support if persistent |
+| Phase 5 deployed unwanted model | Script auto-picked `auto` | Delete model; use `--skip-models` if GUI model already exists |
+| Duplicate OperatorGroup / failed RHOAI CSV | Script + GUI both installed operator | Single `OperatorGroup` in `redhat-ods-operator` |
 
-```bash
-./scripts/import-external-models.sh --endpoint api.openai.com --api-key "$OPENAI_API_KEY" --namespace llm --all
-```
+Verification script: `manifests/06-verification/verify.sh`
 
-## Available Models
+## Documentation map
 
-| Model | GPU Required | VRAM | Use Case |
-|-------|-------------|------|----------|
-| `simulator` | No | None | Testing/demo (CPU-only) |
-| `granite-tiny-gpu` | Yes | < 40 GiB | Small GPU (T4, L4, A10) |
-| `gpt-oss-20b` | Yes | >= 40 GiB | Large GPU (L40S, A100, H100) |
-
-## Documentation
-
-- [RHOAI 3.4 MaaS Official Docs](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index)
-- [Upstream MaaS Documentation](https://opendatahub-io.github.io/models-as-a-service/latest/)
-- [Upstream MaaS Architecture](https://opendatahub-io.github.io/models-as-a-service/latest/concepts/architecture/)
-- Optional GUIs: [content/modules/ROOT/pages/09-optional-guis.adoc](content/modules/ROOT/pages/09-optional-guis.adoc)
+| Resource | Location |
+|----------|----------|
+| Local guide (Markdown) | [`docs/`](docs/) |
+| Published Antora site | https://rh-aiservices-bu.github.io/rhoai-maas-guide/ |
+| Architecture / request flow | [docs/08-architecture.md](docs/08-architecture.md) |
+| Optional GUIs | [docs/09-optional-guis.md](docs/09-optional-guis.md) |
+| Official RHOAI 3.4 MaaS | https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index |
+| Official RHOAI 3.5 MaaS | https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/govern_llm_access_with_models-as-a-service/index |
+| Upstream MaaS project | https://opendatahub-io.github.io/models-as-a-service/latest/ |
 
 ## License
 
-This guide is licensed under the [Apache License 2.0](LICENSE) (same as upstream `rh-aiservices-bu/rhoai-maas-guide`).
+Apache License 2.0 — [LICENSE](LICENSE) (same as upstream `rh-aiservices-bu/rhoai-maas-guide`).
 
-Sibling products have their own terms:
-
-- **Compact MaaS** (`rhoai-maas-console` / `compact-maas`) — **AGPL-3.0-only**
-- **litemaas-rhoai** (Option A deploy wrapper) — **AGPL-3.0-only** (upstream LiteMaaS chart keeps its own license)
+Sibling products: **Compact MaaS** — AGPL-3.0-only; **litemaas-rhoai** — AGPL-3.0-only.

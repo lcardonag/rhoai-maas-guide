@@ -1,27 +1,27 @@
-* xref:index.adoc[Overview]
-* xref:quick-start.adoc[Automated Setup]
+* link:{repo-url}/blob/main/docs/index.md[Overview]
+* link:{repo-url}/blob/main/docs/quick-start.md[Automated Setup]
 
 .Installation Guide
-* xref:01-prerequisites.adoc[Phase 1: Prerequisites]
-* xref:02-platform-config.adoc[Phase 2: Platform Configuration]
-* xref:03-maas-platform.adoc[Phase 3: MaaS Platform]
-* xref:04-rhoai-config.adoc[Phase 4: RHOAI Configuration]
+* link:{repo-url}/blob/main/docs/01-prerequisites.md[Phase 1: Prerequisites]
+* link:{repo-url}/blob/main/docs/02-platform-config.md[Phase 2: Platform Configuration]
+* link:{repo-url}/blob/main/docs/03-maas-platform.md[Phase 3: MaaS Platform]
+* link:{repo-url}/blob/main/docs/04-rhoai-config.md[Phase 4: RHOAI Configuration]
 
 .Model Deployment & Verification
-* xref:05-maas-models.adoc[Phase 5: Model Deployment]
-* xref:06-verification.adoc[Phase 6: Verification]
+* link:{repo-url}/blob/main/docs/05-maas-models.md[Phase 5: Model Deployment]
+* link:{repo-url}/blob/main/docs/06-verification.md[Phase 6: Verification]
 
 .Observability
-* xref:07-observability.adoc[Phase 7: Observability]
+* link:{repo-url}/blob/main/docs/07-observability.md[Phase 7: Observability]
 
 .External Models
-* xref:08-external-models.adoc[Phase 8: External Models]
+* link:{repo-url}/blob/main/docs/08-external-models.md[Phase 8: External Models]
 
 .Optional GUIs
-* xref:09-optional-guis.adoc[Phases 9–10: LiteMaaS and Compact MaaS]
+* link:{repo-url}/blob/main/docs/09-optional-guis.md[Phases 9–10: LiteMaaS and Compact MaaS]
 
 .Reference
-* xref:08-architecture.adoc[Architecture & Request Flow]
+* link:{repo-url}/blob/main/docs/08-architecture.md[Architecture & Request Flow]
 
 .Tools
-* xref:claude-code.adoc[AI-Assisted Installation]
+* link:{repo-url}/blob/main/docs/claude-code.md[AI-Assisted Installation]

@@ -1,0 +1,656 @@
+# Phase 8: External Models (Optional)
+
+You can run **RHOAI MaaS + optional GUIs with zero in-cluster inference**. The gateway fronts third-party **OpenAI-compatible** HTTP APIs (OpenAI, IBM RHAI / Red Hat AI Inference endpoints, Bedrock Mantle, etc.). Consumers always call the MaaS gateway; the platform injects the provider key and applies auth + token limits.
+
+> **Tip:** All file paths and `oc apply` commands are relative to the [rhoai-maas-guide](https://github.com/rh-aiservices-bu/rhoai-maas-guide) repository root.
+
+> **Important:** Companion to the [official RHOAI MaaS docs](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index), not a replacement.
+
+## When to use this path
+
+| Goal | Approach |
+|------|----------|
+| New cluster, no GPUs / no local vLLM | Phases **1–4** (+ **6** verify API) → Phase **8** external models → optional [GUIs](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/09-optional-guis.html) (`--with-compact-maas` / `--with-litemaas`). Skip Phase 5 (`--skip-models`). |
+| OpenAI-compatible SaaS (root `/v1/...`) | `ExternalModel.spec.endpoint` = FQDN only (e.g. `api.openai.com`). Leave upstream path empty. |
+| OpenAI-compatible with *project* base path (IBM RHAI / Inference as a Service) | FQDN + *upstream path prefix* (e.g. `/v1/projects/<uuid>/inference`). Prefer **Compact MaaS** Admin create (sets rewrite + annotation). YAML recipe below. |
+| Compare proxy UX ($ / virtual keys) | Same external models + `--with-litemaas` (wires LiteLLM to gateway). |
+| Register one model, prefer clicking through a form | [Path A](#path-a) — Compact MaaS Admin GUI. |
+| Register many models at once (bulk import, discover a provider's/remote gateway's full `/v1/models` catalog), or no Compact MaaS deployed | [Path B](#path-b) — `scripts/import-external-models.sh`. |
+| Full manual control, GitOps-style YAML, or scripting a single custom OpenAI-compatible host | [Path C](#path-c) — `oc apply` against `manifests/08-external-models/`. |
+
+> **Note:** Phase 5 (local models) is *not* required for external-only. The older note that you need a local model first is obsolete for this path — you only need a programmed MaaS gateway and maas-api.
+
+## Architecture (request path)
+
+```
+Client / GUI
+  → https://maas.<domain>/llm/<model>/v1/chat/completions
+  → AuthPolicy (MaaS API key sk-oai-…)
+  → HTTPRoute URLRewrite: strip /llm/<model> → /  OR  → /v1/projects/.../inference
+  → BBR injects provider Secret api-key as Authorization: Bearer …
+  → Upstream: https://{FQDN}{prefix}/v1/chat/completions
+```
+
+Important field meanings:
+
+| Field | Meaning |
+|-------|---------|
+| `ExternalModel.spec.endpoint` | *FQDN only* — no `https://`, no path, no port (e.g. `us-east.rhai.ibm.com`) |
+| Upstream path prefix | Optional. Path only, starts with `/`, *no* trailing slash. Compact MaaS annotation `compact-maas/upstream-path-prefix`. HTTPRoute `URLRewrite` target. *Not* ModelRef `endpointOverride`. |
+| ModelRef `endpointOverride` | Optional *MaaS gateway catalog* URL (`https://maas…/llm/<name>`). Do *not* put the IBM project URL here. |
+| `spec.provider` | BBR translator: usually `openai` for OpenAI-compatible hosts |
+| `spec.targetModel` | Model id sent in the JSON body upstream |
+
+## How It Works (five resources)
+
+1. **Secret** — provider API key; labels `inference.networking.k8s.io/bbr-managed=true` *and* (RHOAI 3.4) `ipp-managed=true` when using the Compact MaaS path.
+2. **ExternalModel** — provider, targetModel, endpoint FQDN, credentialRef (+ optional path-prefix annotation).
+3. **MaaSModelRef** — catalog entry (must become *Ready*).
+4. **MaaSAuthPolicy** — who may call the model on the gateway.
+5. **MaaSSubscription** — who may mint API keys + Limitador token windows.
+
+## Path A — Compact MaaS Admin (recommended for IBM / RHAI) {#path-a}
+
+Requires [Phase 10](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/09-optional-guis.html) (`--with-compact-maas`) and an admin in `maas-admins`.
+
+1. Deploy MaaS without local models:
+
+```bash
+./scripts/setup-maas.sh --skip-models --with-compact-maas
+# or later:
+./scripts/setup-maas.sh --from-phase 10 --with-compact-maas
+```
+
+2. Open Compact MaaS → **Admin** → **Model refs** → **Create** → Backend **ExternalModel**.
+
+3. Fill:
+
+| Field | Example (IBM RHAI / Inference as a Service) |
+|-------|-------------------------------------------|
+| Name / ModelRef id | `granite-rhai` (catalog id clients use) |
+| Namespace | `llm` (Compact MaaS default) or `external-models` |
+| Provider | `openai` |
+| Endpoint (FQDN) | `us-east.rhai.ibm.com` — *host only* |
+| Upstream path prefix | `/v1/projects/002d4a39-9d40-4c25-a9fa-a603eebdb574/inference` — *no* trailing slash |
+| Endpoint override | *leave empty* |
+| Target model | Provider catalog id (e.g. `granite-4-0-h-small`) |
+| API key | Real IBM / RHAI key (≥16 chars; not equal to name or targetModel) |
+
+4. Click **Test connection** (must pass). The BFF probes `https://{FQDN}{prefix}/v1/models` then chat.
+
+5. **Save** — provisions Secret + ExternalModel + MaaSModelRef and heals HTTPRoute `URLRewrite` to the prefix.
+
+6. Create **Subscription** + **AuthPolicy** (Admin forms) so the model is visible on **Models** and users can mint keys. Open = `system:authenticated`; restricted = enroll group or user-by-user Approve.
+
+7. Users: subscribe / request access → **API keys** → call:
+
+```bash
+curl --http1.1 -sS -w '\nhttp_code=%{http_code}\n' -X POST \
+  "https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')/llm/granite-rhai/v1/chat/completions" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"granite-rhai","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+```
+
+> **Tip:** After create, confirm rewrite: `oc get httproute granite-rhai -n llm -o yaml | grep -A6 URLRewrite` and annotation `compact-maas/upstream-path-prefix` on the ExternalModel.
+
+> **Important:** HTTPRoute `URLRewrite` alone is *not* enough for IBM RHAI. BBR/payload-processing normalizes the upstream path to `/v1/chat/completions` and drops `/v1/projects/<uuid>/inference`. Apply the durable EnvoyFilter in [IBM RHAI: durable upstream path prefix](#ibm-rhai-envoyfilter) (required for Compact MaaS Admin *and* bulk import).
+
+## Path B — Bulk import script (discover `/v1/models`, no GUI) {#path-b}
+
+For providers that expose an OpenAI-compatible `/v1/models` listing, `scripts/import-external-models.sh` discovers every available model id and creates the *same* resources as Compact MaaS Admin's ExternalModel **Create** form — for one model or all of them — via plain `oc`. Useful when you don't want to click through the GUI once per model, or don't have Compact MaaS deployed at all. Works equally well against a stock provider (OpenAI) or against *another MaaS gateway* (e.g. a remote RHDP/workshop cluster) that fronts its own catalog behind an OpenAI-compatible `/v1/models`.
+
+It:
+
+1. Calls `GET https://{endpoint}{path-prefix}/v1/models` with your API key (a path pasted into `--endpoint` is auto-detected as the path prefix).
+2. Lists discovered model ids; select with `--all`, `--models id1,id2`, `--filter <regex>`, or an interactive prompt.
+3. For each selected id: creates one *shared* credential Secret per endpoint (labels `inference.networking.k8s.io/bbr-managed=true` + `inference.networking.k8s.io/ipp-managed=true`), an `ExternalModel` (name sanitized from the model id), a `MaaSModelRef`, and — unless `--skip-governance` — an open `MaaSAuthPolicy` + `MaaSSubscription` (`system:authenticated`, 10k tokens/hour by default).
+4. Heals the HTTPRoute `URLRewrite` for the catalog `/<namespace>/<name>` prefix, the same way Compact MaaS Admin does. External-model HTTPRoutes are created asynchronously by the MaaS controller, so the heal step polls (18 attempts, 5s apart ≈ 90s) instead of assuming the route exists immediately; if it never shows up in time, the script warns and *moves on to the next model* instead of aborting the whole `--all`/`--models` run.
+
+Every mutation is `oc apply` (or an idempotent `oc patch` for the HTTPRoute), so **re-running the same command against the same source is always safe** — already-created Secret/ExternalModel/MaaSModelRef/MaaSAuthPolicy/MaaSSubscription are simply reconciled to the same state, and the HTTPRoute heal short-circuits once it detects the desired `URLRewrite` is already in place.
+
+> **Warning:** If a model **name already exists** in the target namespace, re-running the script **updates it to the latest import** — it is *not* skipped. `oc apply` overwrites the existing `ExternalModel`'s endpoint, path prefix, and `credentialRef` (Secret) to match whatever source (`--endpoint`/`--path-prefix`/`--api-key`) you ran against *this time*. Same catalog name = one upstream, last writer wins. See [name-collision details](#resuming-a-model-name-collision) below for a worked example and how to avoid it.
+
+> **Important:** If the provider's base URL already ends in `/v1` (e.g. `https://host/v1`), pass the **host only** to `--endpoint` — do *not* also pass `/v1` (or `--path-prefix /v1`). The script always appends `/v1/models` itself, so `--endpoint host/v1` becomes `GET https://host/v1/v1/models` and 404s. Only use `--path-prefix` for a base path *before* `/v1` (e.g. IBM RHAI's `/v1/projects/<uuid>/inference`, which is followed by its own `/v1/...`).
+
+```bash
+# Stock OpenAI, register every model
+./scripts/import-external-models.sh --endpoint api.openai.com \
+    --api-key "$OPENAI_API_KEY" --all
+
+# IBM RHAI / project-prefixed host, pick specific models, Compact MaaS namespace
+./scripts/import-external-models.sh \
+    --endpoint us-east.rhai.ibm.com \
+    --path-prefix /v1/projects/<uuid>/inference \
+    --api-key "$RHAI_API_KEY" --namespace llm \
+    --models granite-4-0-h-small,granite-4-0-h-tiny
+
+# After any IBM RHAI import, apply the path-prefix EnvoyFilter (see IBM RHAI section):
+# oc apply -f manifests/08-external-models/openai-compatible-prefixed/ibm-rhai-upstream-path-prefix-envoyfilter.yaml
+
+# Remote MaaS gateway (e.g. an RHDP/workshop cluster) — host only, NOT /v1
+# --api-key here is the *remote* gateway's MaaS API key (sk-oai-...), not a local one.
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --list
+
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --all
+
+# Just see what's there, no changes
+./scripts/import-external-models.sh --endpoint api.openai.com --api-key "$OPENAI_API_KEY" --list
+
+# Preview every manifest without touching the cluster
+./scripts/import-external-models.sh --endpoint api.openai.com --api-key "$OPENAI_API_KEY" --all --dry-run
+```
+
+See `./scripts/import-external-models.sh --help` for the full option list (custom `--secret-name`, `--governance-namespace`, `--restricted`, `--token-limit`/`--token-window`, `--skip-namespace`, `--skip-route-heal`, `--no-wait`).
+
+### Resuming a partial `--all` / `--models` run
+
+If the run stops partway (network blip, `Ctrl-C`, or the HTTPRoute heal gave up on one model after ~90s), just **re-run the exact same command**:
+
+```bash
+# Re-run --all: already-registered models are no-ops (oc apply is idempotent);
+# only the remaining/failed ones do real work.
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --all
+```
+
+To target only the models that didn't finish (skips re-discovery selection noise), diff what's registered against what was discovered and pass the remainder to `--models`:
+
+```bash
+oc get maasmodelref -n llm -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'   # already done
+./scripts/import-external-models.sh --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm --list   # full discovered id list
+
+./scripts/import-external-models.sh \
+    --endpoint maas-rhdp.apps.maas.redhatworkshops.io \
+    --api-key "$REMOTE_MAAS_API_KEY" --namespace llm \
+    --models model-id-3,model-id-4,model-id-5   # remaining ids only
+```
+
+If a specific HTTPRoute never healed (script gave up after ~90s), heal it manually once it appears, then re-run to confirm:
+
+```bash
+oc get httproute <name> -n llm -o yaml | grep -A6 URLRewrite
+# If missing, re-run the import command (heal_http_route is idempotent) or patch by hand — see URLRewrite section.
+```
+
+### Re-running against a *different* source: name collisions overwrite, they don't skip {#resuming-a-model-name-collision}
+
+> **Warning:** "Re-running is always safe" above assumes you're resuming *the same* import (same endpoint/models). If you instead run `--all`/`--models` against a **different** `--endpoint` and one of *its* discovered ids sanitizes to the **same `MaaSModelRef`/`ExternalModel` name** already registered from a previous run, that existing resource is **updated to point at the new source, not left alone**. `oc apply` has no notion of "already imported from somewhere else" — it just reconciles the named object to whatever manifest this run generated, so the endpoint, upstream path prefix, and credential Secret (`credentialRef`) all flip to the latest run. Same name = one upstream; **last writer wins**.
+
+Worked example: `gpt-oss-120b` was first imported from a remote workshop gateway (`--endpoint maas-rhdp.apps.maas.redhatworkshops.io ... --all`). Later, running `--all` again against IBM RHAI (`--endpoint us-east.rhai.ibm.com --path-prefix /v1/projects/<uuid>/inference ...`) discovers an id that also sanitizes to `gpt-oss-120b`. That single `ExternalModel gpt-oss-120b` now gets `oc apply`'d with IBM RHAI's endpoint, path prefix, and credentials — silently replacing the maas-rhdp backend. Clients still calling `/llm/gpt-oss-120b/...` are now served by IBM RHAI instead, with no error and no prompt.
+
+To avoid this:
+
+- **Keep both backends registered side by side** — give them distinct `MaaSModelRef`/`ExternalModel` names before the second import, e.g. `--name-prefix rhai-` (or `--name-prefix rhdp-` on the first run) so the sanitized names never collide.
+- **Only touch new ids, leave every existing name alone** — use `--models id1,id2,...` with just the ids you actually want added, instead of `--all`, when importing from a second source into a namespace that already has models from a first source.
+- Before a second `--all` against a new source, compare `oc get maasmodelref -n <ns> -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'` (already registered) against `--list` output from the *new* endpoint (what it would discover) to spot overlapping names ahead of time.
+
+> **Note:** This script only registers models on the *native* MaaS gateway (`/llm/<name>/v1/...`). Wiring a separately-deployed LiteMaaS/LiteLLM PoC to those same models is a distinct, later, optional step — see below.
+
+### After import: Compact MaaS vs LiteMaaS {#after-import}
+
+`import-external-models.sh` (and Path A/C) only create resources on the *native* MaaS gateway: `ExternalModel` + `MaaSModelRef` + governance CRs in `llm` / `models-as-a-service`. What happens next depends on which optional GUI ([Phases 9–10](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/09-optional-guis.html)) you run:
+
+| | **Compact MaaS** | **LiteMaaS / LiteLLM** |
+|---|------------------|------------------------|
+| Sees the newly-registered model? | Immediately — same native MaaS catalog. | *No.* LiteLLM keeps its own separate model registry; it stays empty for these models until you explicitly wire them. |
+| What you need to do | Nothing extra — Subscribe / browse as usual. | Mint a local MaaS API key per model, then run `wire-maas-models.sh` / `wire-all-ready-models.sh` in `litemaas-rhoai` (see below). |
+
+#### Minting the local MaaS key LiteLLM needs
+
+Unless you passed `--skip-governance`, the import script created one open `<model>-free` `MaaSSubscription` **per model** — i.e. one subscription per model, not one shared subscription. To wire a model into LiteLLM you therefore mint **one local MaaS API key per model/subscription**:
+
+```bash
+# Mint a key scoped to one model's <model>-free subscription
+curl -sk -X POST "https://maas.<cluster-domain>/maas-api/v1/api-keys" \
+    -H "Authorization: Bearer $(oc whoami -t)" \
+    -H "Content-Type: application/json" \
+    -d '{"name":"litemaas-wire-<model>","subscription":"<model>-free","expiresIn":"2160h"}'
+```
+
+`litemaas-rhoai/scripts/wire-all-ready-models.sh` does this minting for you — for every `Ready` `MaaSModelRef` in `llm` — and immediately registers each one in LiteLLM, so you don't have to juggle keys by hand:
+
+```bash
+cd ../litemaas-rhoai
+./scripts/wire-all-ready-models.sh
+```
+
+Prefer manual control over which models/keys get wired, or need to target an endpoint that isn't a `Ready` `MaaSModelRef` (e.g. a raw external provider)? Use `wire-maas-models.sh` instead (also triggered automatically via `MAAS_API_KEY` in [Phase 9](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/09-optional-guis.html)).
+
+> **Important:** The locally-minted MaaS key above is **LiteLLM's upstream credential** — what LiteLLM sends to the native MaaS gateway on your behalf. It is *not* what end users use. LiteMaaS end users authenticate with their own **LiteMaaS virtual keys** (LiteMaaS UI → API keys), which LiteLLM maps internally to the correct upstream MaaS key.
+
+> **Caution:** Don't confuse that **local** MaaS key (minted against *this* cluster's gateway, used only for wiring into LiteLLM) with a **remote provider key** like `$REMOTE_MAAS_API_KEY` used earlier to `import-external-models.sh --endpoint maas-rhdp...` *from* a different cluster's MaaS gateway. They authenticate against two different gateways for two entirely different purposes.
+
+## Removing an external model {#removing-an-external-model}
+
+There is no `uninstall`/`delete` counterpart to `import-external-models.sh` — teardown is a manual, ordered `oc delete` sequence (or the equivalent Compact MaaS Admin clicks). Deleting out of order is usually harmless (governance CRs referencing a missing ModelRef just stop matching anything), but following the order below avoids a brief window where a `MaaSAuthPolicy`/`MaaSSubscription` still advertises a model whose backend is already gone.
+
+> **Note:** Repointing a model to a different upstream doesn't require any of the deletion below — re-running `import-external-models.sh` against the new source with the **same** model name updates the existing `ExternalModel` in place (see [name-collision section](#resuming-a-model-name-collision)). Use this teardown section only when you want the model gone entirely, not repointed.
+
+> **Warning:** Deleting the credential *Secret* is the one step that can break **other, unrelated models**. `import-external-models.sh` creates *one shared Secret per endpoint* (named `<endpoint-slug>-credentials`, reused for every model registered from that host in the same run), while Compact MaaS Admin's ExternalModel create/rotate flow creates a *dedicated* `<name>-credentials` Secret per model. Always check `credentialRef.name` on every `ExternalModel` still using that Secret before you delete it — see step 5.
+
+### Rotate a key vs. remove a model
+
+- **Rotate only** (keep the model, replace the provider key): don't delete anything below. Compact MaaS Admin → *Model refs* → *Edit* → *Update provider API key* → *Test connection* → *Save* (rewrites the existing Secret in place). Manual equivalent: `oc create secret generic <name>-credentials --from-literal=api-key="$NEW_KEY" -n llm --dry-run=client -o yaml | oc apply -f -`, then re-apply the `bbr-managed`/`ipp-managed` labels (see [Known Issues](#known-issues) if the labels don't stick after an upgrade).
+- **Remove one model** on a host that serves several: run steps 1–4 below for that model only, then check step 5 before touching the shared Secret — other `ExternalModel` CRs on the same host are probably still using it.
+- **Remove an entire endpoint** (every model registered from one host): repeat steps 1–4 for *each* model on that host, confirm no `ExternalModel` still references the shared Secret, *then* delete the Secret last.
+
+### Teardown order
+
+1. **(Optional) Revoke the user-minted MaaS API keys tied to that subscription.** Not required to remove the model — existing keys simply stop working once the `MaaSSubscription`/`MaaSAuthPolicy` are deleted (step 2) — but revoking first gives clean audit trail / immediate denial instead of a 403 on next use. Compact MaaS Admin → *Subscriptions* → open the subscription → *API keys*, or via the dashboard's own *API keys* page (self-service, own keys only). Scripted, if you already have the key `id` (returned at mint time, or from the UI):
+
+```bash
+MAAS_GW="https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
+curl -sk -X DELETE "${MAAS_GW}/maas-api/v1/api-keys/${API_KEY_ID}" \
+    -H "Authorization: Bearer $(oc whoami -t)"
+```
+
+2. **Delete the governance CRs** — `MaaSSubscription` and `MaaSAuthPolicy` (namespace `models-as-a-service` by default). Names follow the `<name>-free` / `<name>-access` convention used by `import-external-models.sh`, Path C manifests, and Compact MaaS Admin:
+
+```bash
+oc delete maassubscription <name>-free -n models-as-a-service
+oc delete maasauthpolicy <name>-access -n models-as-a-service
+```
+
+Compact MaaS Admin path: *Subscriptions* → delete the subscription → *Auth policies* → delete the matching policy. Delete the Subscription first (stops new key mints) and the AuthPolicy right after (stops the gateway from accepting already-minted keys) so there's no in-between window where old keys still authenticate against a model you're mid-removal on.
+
+3. **Delete the catalog + backend CRs** — `MaaSModelRef` and `ExternalModel` (namespace `llm` for Compact MaaS-created models, `external-models` for Path C manifests — check `oc get maasmodelref -A` if unsure):
+
+```bash
+oc delete maasmodelref <name> -n llm
+oc delete externalmodel <name> -n llm
+```
+
+Compact MaaS Admin path: *Model refs* → delete the entry (this also deletes the underlying `ExternalModel` it created).
+
+4. **Delete the leftover `HTTPRoute`, if the reconciler didn't already garbage-collect it:**
+
+```bash
+oc get httproute <name> -n llm
+# if still present:
+oc delete httproute <name> -n llm
+```
+
+5. **Delete the credential Secret — only if nothing else still uses it.** Check first:
+
+```bash
+# Every ExternalModel still pointing at this Secret, across all namespaces:
+oc get externalmodel -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" -> "}{.spec.credentialRef.name}{"\n"}{end}' \
+    | grep '<secret-name>'
+```
+
+- Empty output → safe to delete:
+
+```bash
+oc delete secret <secret-name> -n llm
+```
+
+- Any lines returned → **do not delete**; another model (possibly registered in a different `import-external-models.sh` run against the same `--endpoint`) still authenticates through that Secret. Remove those models first, or leave the Secret in place.
+
+Rule of thumb for *which* Secret name to check: Compact MaaS Admin-created models use a dedicated `<name>-credentials` Secret (safe to delete once that one model is gone); `import-external-models.sh`-created models share `<endpoint-slug>-credentials` across every model pulled from that `--endpoint` in the same run (only delete once *all* of them are gone).
+
+6. **If the model was wired into LiteMaaS/LiteLLM** ([After import](#after-import)), native MaaS deletion above does **not** touch LiteLLM's separate model registry — its entry (and any `wire-*`-minted upstream MaaS key) stays behind as a dangling backend. `litemaas-rhoai`'s `wire-maas-models.sh` / `wire-all-ready-models.sh` only *add* models (`POST /model/new`) — there is no `--delete` counterpart, so remove it one of two ways:
+
+   - **LiteMaaS/LiteLLM admin UI** (simplest): sign in as an admin → *Models* → find the entry → *Delete*. Requires a **Models Sync** afterwards if end users should stop seeing it in the LiteMaaS catalog (Admin → Tools → *Models Sync* — see `litemaas-rhoai/docs/wiring-models.md`, "When to sync LiteMaaS catalog").
+   - **Raw LiteLLM proxy API**, using the same Secret `wire-all-ready-models.sh` reads the master key from:
+
+```bash
+cd ../litemaas-rhoai
+NS=litemaas
+LITELLM_MASTER_KEY=$(oc get secret litemaas-litellm -n ${NS} -o json \
+    | python3 -c "import json,sys,base64; d=json.load(sys.stdin)['data']; [print(base64.b64decode(v).decode()) for k,v in d.items() if 'master' in k.lower()]")
+LITELLM_URL="https://$(oc get route -n ${NS} -o jsonpath='{range .items[*]}{.spec.host}{"\n"}{end}' | grep -E '^litellm\.' | head -1)"
+
+# Find the internal LiteLLM model_id for this model name
+curl -sk "${LITELLM_URL}/model/info" -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
+    | python3 -c "import sys,json; [print(m['model_info']['id'], m['model_name']) for m in json.load(sys.stdin)['data']]"
+
+curl -sk -X POST "${LITELLM_URL}/model/delete" \
+    -H "Authorization: Bearer ${LITELLM_MASTER_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"id":"<model_id-from-above>"}'
+```
+
+### Worked example: fully remove one Compact MaaS-created model
+
+```bash
+NAME=granite-rhai
+NS=llm
+
+oc delete maassubscription ${NAME}-free -n models-as-a-service
+oc delete maasauthpolicy ${NAME}-access -n models-as-a-service
+oc delete maasmodelref ${NAME} -n ${NS}
+oc delete externalmodel ${NAME} -n ${NS}
+oc get httproute ${NAME} -n ${NS} && oc delete httproute ${NAME} -n ${NS}
+
+# Confirm no sibling ExternalModel shares the credential Secret before deleting it:
+oc get externalmodel -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" -> "}{.spec.credentialRef.name}{"\n"}{end}' \
+    | grep "${NAME}-credentials"
+oc delete secret ${NAME}-credentials -n ${NS}
+```
+
+### Worked example: fully remove an endpoint imported with `import-external-models.sh --all`
+
+```bash
+NS=llm
+SECRET=us-east-rhai-ibm-com-credentials   # <endpoint-slug>-credentials, printed by the import script's "Credential Secret:" log line
+
+for NAME in granite-4-0-h-small granite-4-0-h-tiny; do
+    oc delete maassubscription ${NAME}-free -n models-as-a-service
+    oc delete maasauthpolicy ${NAME}-access -n models-as-a-service
+    oc delete maasmodelref ${NAME} -n ${NS}
+    oc delete externalmodel ${NAME} -n ${NS}
+    oc delete httproute ${NAME} -n ${NS} --ignore-not-found
+done
+
+# Only after every model on that endpoint is gone:
+oc get externalmodel -A -o jsonpath='{range .items[*]}{.spec.credentialRef.name}{"\n"}{end}' | grep -c "${SECRET}"
+# expect 0, then:
+oc delete secret ${SECRET} -n ${NS}
+```
+
+## Path C — YAML / oc (guide manifests + custom OpenAI-compatible) {#path-c}
+
+### Skip local inference on a new cluster
+
+```bash
+./scripts/setup-maas.sh --skip-models
+# Then Phase 8 (stock OpenAI) or apply custom YAMLs below
+./scripts/setup-maas.sh --from-phase 8 --with-external-models \
+  --external-model-provider openai --external-model-api-key "$OPENAI_API_KEY"
+```
+
+### Stock providers (OpenAI / Gemini / Bedrock)
+
+See sections below for guided OpenAI, Gemini, and Bedrock. Automated:
+
+```bash
+./scripts/setup-maas.sh --from-phase 8 \
+    --with-external-models \
+    --external-model-provider openai \
+    --external-model-api-key "$OPENAI_API_KEY"
+```
+
+### Custom OpenAI-compatible host (root `/v1`)
+
+Copy the OpenAI layout under `manifests/08-external-models/openai/` and change `spec.endpoint` / `targetModel` / names. Example ExternalModel:
+
+```yaml
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: my-saas-model
+  namespace: external-models
+spec:
+  provider: openai
+  targetModel: my-model-id
+  endpoint: api.example.com   # FQDN only
+  credentialRef:
+    name: my-saas-api-key
+```
+
+Secret (never commit the key):
+
+```bash
+oc create secret generic my-saas-api-key \
+  --from-literal=api-key="$PROVIDER_API_KEY" \
+  -n external-models --dry-run=client -o yaml | oc apply -f -
+oc label secret my-saas-api-key -n external-models \
+  inference.networking.k8s.io/bbr-managed=true \
+  inference.networking.k8s.io/ipp-managed=true --overwrite
+```
+
+Then apply matching `MaaSModelRef`, `MaaSAuthPolicy`, and `MaaSSubscription` (see OpenAI `maas/` examples). After the HTTPRoute appears, ensure URLRewrite strips `/llm/<name>` → `/` (Compact MaaS heals this; for pure `oc`, patch as in [URLRewrite](#urlrewrite)).
+
+### IBM RHAI / path-prefixed OpenAI-compatible (YAML)
+
+Platform `ExternalModel.spec.endpoint` cannot store a path. Use:
+
+1. FQDN in `spec.endpoint`
+2. Annotation for the project base path
+3. HTTPRoute `URLRewrite` `ReplacePrefixMatch` = that path (Compact MaaS does this; YAML operators must patch the route)
+
+Templates: `manifests/08-external-models/openai-compatible-prefixed/` (placeholders).
+
+```yaml
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: granite-rhai
+  namespace: llm   # or external-models — match ModelRef ns
+  annotations:
+    # Consumed by Compact MaaS BFF for test-connection + URLRewrite heal
+    compact-maas/upstream-path-prefix: "/v1/projects/REPLACE-PROJECT-UUID/inference"
+spec:
+  provider: openai
+  targetModel: REPLACE-TARGET-MODEL-ID
+  endpoint: us-east.rhai.ibm.com
+  credentialRef:
+    name: granite-rhai-credentials
+```
+
+Upstream effective URL shape:
+
+```
+https://us-east.rhai.ibm.com/v1/projects/<uuid>/inference/v1/chat/completions
+```
+
+Client (unchanged gateway shape):
+
+```
+https://maas.<domain>/llm/granite-rhai/v1/chat/completions
+```
+
+#### Heal HTTPRoute URLRewrite (manual) {#urlrewrite}
+
+After ModelRef is Ready and HTTPRoute exists:
+
+```bash
+# Example: rewrite /llm/granite-rhai → /v1/projects/<uuid>/inference
+# Prefer Compact MaaS Admin create (auto). Manual patch shape depends on HTTPRoute filters;
+# see compact-maas docs admin/subscriptions-and-enrollment.md (ExternalModel Chat 404 section).
+oc get httproute granite-rhai -n llm -o yaml
+```
+
+If inference returns `404 {"detail":"Not Found"}`, the HTTPRoute rewrite may be wrong or missing — but an *empty* 404 body with a valid MaaS key usually means BBR dropped the IBM project prefix (see [IBM RHAI EnvoyFilter](#ibm-rhai-envoyfilter)).
+
+#### IBM RHAI: durable upstream path prefix (EnvoyFilter) {#ibm-rhai-envoyfilter}
+
+**Symptom:** Direct IBM `curl` with the IBM API key works. The same request through the MaaS gateway with a `*-free` subscription key returns an empty *404* (no useful body). Prefer `--http1.1` when testing.
+
+**Root cause:** BBR/payload-processing rewrites `:path` to `/v1/chat/completions`, dropping `/v1/projects/<uuid>/inference`. That stripped path also means Envoy matches the HTTPRoute *header* rule (`X-Gateway-Model-Name`), not the `/llm/<model>` PathPrefix rule that carries `URLRewrite` — so rule-1 rewrite alone never runs for typical BBR traffic. Gateway API `URLRewrite` cannot restore the project prefix after BBR. `RequestHeaderModifier` Host / `x-ibm-rhai-prefix` patches are applied at *router* time, so a Lua filter after `ext_proc.bbr` must *not* rely on those headers alone.
+
+**Fix (two layers):**
+
+- *Compact MaaS / import heal:* when `compact-maas/upstream-path-prefix` is set, ensure `x-ibm-rhai-prefix` on *all* HTTPRoute rules (including the BBR header-match rule) plus `URLRewrite` on the `/llm/<name>` rule — needed for api-translation and as a signal when the header is still visible.
+- *Durable:* EnvoyFilter `ibm-rhai-upstream-path-prefix` in `openshift-ingress`, targeting Gateway `maas-default-gateway`. Lua inserted *after* `ext_proc.bbr` detects IBM models via `routeName` / `X-Gateway-Model-Name` / original path `/llm/<model>/`, then sets `:path` to `prefix + "/" + rest`. Treat the EnvoyFilter as belt-and-suspenders when BBR normalizes the path.
+
+```bash
+oc apply -f manifests/08-external-models/openai-compatible-prefixed/ibm-rhai-upstream-path-prefix-envoyfilter.yaml
+# Restart the maas-default-gateway Envoy pod in openshift-ingress if the filter does not attach immediately
+```
+
+Edit the Lua `prefix` (project UUID) and `models` list in that manifest before apply when your IBM project or catalog differs.
+
+**Test** (MaaS subscription key for a `*-free` sub — *not* the IBM key):
+
+```bash
+curl --http1.1 -skS -X POST \
+  "https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')/llm/llama-3-3-70b-instruct/v1/chat/completions" \
+  -H "Authorization: Bearer $MAAS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"llama-3-3-70b-instruct","messages":[{"role":"user","content":"Say hi"}],"max_tokens":16}'
+```
+
+> **Note:** IBM may respond with HTTP *202* while still returning completed `choices` — treat that as success.
+
+**Caveats:**
+
+- Model ids and project UUID are hardcoded in the Lua — new IBM models need an EnvoyFilter update.
+- The MaaS external-model reconciler may overwrite HTTPRoute header/URLRewrite patches; Compact MaaS Admin list/get and import `--path-prefix` re-heal `URLRewrite` + `x-ibm-rhai-prefix` on all rules. This EnvoyFilter remains the durable post-BBR fix.
+- Import / Compact MaaS still use `--path-prefix` / `compact-maas/upstream-path-prefix` for discovery and route heal; keep that annotation, and *also* apply this filter.
+
+## Step-by-step: stock OpenAI (manifests)
+
+### Step 1: Namespace and Secret
+
+```bash
+oc apply -f manifests/08-external-models/openai/namespace.yaml
+```
+
+> **Note:** Namespace needs `maas.opendatahub.io/gateway-access=true` for Gateway HTTPRoutes.
+
+```bash
+oc create secret generic openai-api-key \
+    --from-literal=api-key="$OPENAI_API_KEY" \
+    -n external-models \
+    --dry-run=client -o yaml | oc apply -f -
+
+oc label secret openai-api-key -n external-models \
+    inference.networking.k8s.io/bbr-managed=true --overwrite
+```
+
+> **Important:** Without `bbr-managed=true`, upstream calls get 401 (provider key never injected).
+
+### Step 2: ExternalModel CR
+
+```bash
+oc apply -k manifests/08-external-models/openai/model/
+```
+
+```yaml
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: gpt-4o-mini
+  namespace: external-models
+spec:
+  provider: openai
+  targetModel: gpt-4o-mini
+  endpoint: api.openai.com
+  credentialRef:
+    name: openai-api-key
+```
+
+### Step 3: MaaS governance
+
+```bash
+oc apply -k manifests/08-external-models/openai/maas/
+```
+
+Creates `MaaSModelRef`, open `MaaSAuthPolicy`, and free-tier `MaaSSubscription` (10k tokens/hour).
+
+## Verification
+
+```bash
+oc get maasmodelref gpt-4o-mini -n external-models
+# Expected: PHASE = Ready
+
+MAAS_GW="https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
+
+# Admin catalog check (OpenShift token):
+curl -sk "${MAAS_GW}/maas-api/v1/models" \
+  -H "Authorization: Bearer $(oc whoami -t)" | python3 -m json.tool
+```
+
+```bash
+API_KEY=$(curl -sk -X POST "${MAAS_GW}/maas-api/v1/api-keys" \
+    -H "Authorization: Bearer $(oc whoami -t)" \
+    -H "Content-Type: application/json" \
+    -d '{"name": "openai-test", "subscription": "openai-free", "expiresIn": "1h"}' \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key',''))")
+
+curl --http1.1 -sk "${MAAS_GW}/external-models/gpt-4o-mini/v1/chat/completions" \
+    -H "Authorization: Bearer ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Say hello in 3 words."}], "max_tokens": 20}'
+```
+
+For **in-cluster** bundled/GUI models (not external-models path), use gateway root: `GET /v1/models` and `POST /v1/chat/completions` with the `id` from the listing (see README).
+
+Catalog models created via Compact MaaS in `llm` use `/llm/<name>/v1/...` (same auth).
+
+> **Warning:** Platform BBR EnvoyFilter match bugs can cause 404/401 — see [Known Issues](#known-issues). Compact MaaS deploys a durable BBR anchor EnvoyFilter when you use `--with-compact-maas`.
+
+## Automated Setup
+
+```bash
+./scripts/setup-maas.sh --from-phase 8 \
+    --with-external-models \
+    --external-model-provider openai \
+    --external-model-api-key "$OPENAI_API_KEY"
+```
+
+`--external-model-provider`: `openai` | `gemini` | `bedrock`.
+
+## Other Providers
+
+### Google Gemini {#google-gemini}
+
+Manifests: `manifests/08-external-models/gemini/`. Flag: `--external-model-provider gemini`.
+
+> **Warning:** BBR `openai` translator hardcodes `/v1/chat/completions`; Gemini OpenAI-compat needs `/v1beta/openai/chat/completions` → inference often 404. Registration/governance still work. Tracked RHOAIENG-68592.
+
+### AWS Bedrock {#aws-bedrock}
+
+Manifests: `manifests/08-external-models/bedrock/`. Use Mantle host `bedrock-mantle.<region>.api.aws` and provider `bedrock-openai`. ABSK API key required — see Bedrock IAM steps in older guide revisions or AWS docs.
+
+```bash
+./scripts/setup-maas.sh --from-phase 8 \
+    --with-external-models \
+    --external-model-provider bedrock \
+    --external-model-api-key "$BEDROCK_API_KEY"
+```
+
+## Known Issues {#known-issues}
+
+### ext-proc filter not inserted (RHOAIENG-68594)
+
+`payload-processing` EnvoyFilter may not attach; no credential injection / path rewrite → 401/404. Compact MaaS `--with-compact-maas` applies `scripts/fix-payload-processing-envoyfilter.sh` (durable anchor). Re-apply after MaaS/RHCL upgrades.
+
+### Gemini path incompatibility (RHOAIENG-68592)
+
+See [Google Gemini](#google-gemini).
+
+### IBM RHAI empty 404 (BBR drops project path prefix)
+
+Direct IBM calls succeed; gateway calls with a MaaS key return empty 404. BBR normalizes to `/v1/chat/completions` (matching the header-match HTTPRoute rule) and drops `/v1/projects/<uuid>/inference`. Compact MaaS/import should set `x-ibm-rhai-prefix` on all rules; still apply [IBM RHAI EnvoyFilter](#ibm-rhai-envoyfilter) — do not expect Host/`x-ibm-rhai-prefix` HTTPRoute patches alone to fix it after BBR.
+
+### Wrong field for IBM project URL
+
+Putting `https://…/v1/projects/…/inference/` in *Endpoint override* does nothing for upstream routing. Use FQDN + *Upstream path prefix* (Compact MaaS) or the annotation + URLRewrite (YAML), *plus* [IBM RHAI EnvoyFilter](#ibm-rhai-envoyfilter) for inference.
+
+## Appendix
+
+### Directory Structure
+
+```
+manifests/08-external-models/
+  openai/ ... gemini/ ... bedrock/
+  openai-compatible-prefixed/   # IBM RHAI-style templates + ibm-rhai-upstream-path-prefix EnvoyFilter
+```
+
+### Supported ExternalModel providers (BBR)
+
+- `openai`
+- `anthropic`
+- `azure-openai`
+- `bedrock-openai`
+
+## References
+
+- [RHOAI ExternalModel documentation](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index#maas-external-model_maas-deploy)
+- Compact MaaS operator notes: `compact-maas/docs/admin/subscriptions-and-enrollment.md` (ExternalModel + path prefix)
+- [BBR repository](https://github.com/opendatahub-io/ai-gateway-payload-processing)
+
+## Next steps
+
+- [Optional GUIs](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/09-optional-guis.html) — Compact MaaS and/or LiteMaaS without local inference
+- [Architecture & Request Flow](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/08-architecture.html)
+- [Removing an external model](#removing-an-external-model) — teardown checklist for API keys, subscriptions, model refs, and credential Secrets

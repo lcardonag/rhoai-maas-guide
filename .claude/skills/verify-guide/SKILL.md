@@ -325,10 +325,10 @@ If API key creation fails (empty key), try with the verify.sh subscription name 
 
 ```bash
 MODELS_RESPONSE=$(curl -sk --connect-timeout 10 --max-time 30 \
-    "${MAAS_URL}/maas-api/v1/models" \
+    "${MAAS_URL}/v1/models" \
     -H "Authorization: Bearer ${API_KEY}")
 MODEL_COUNT=$(echo "$MODELS_RESPONSE" | jq '.data | length' 2>/dev/null || echo "0")
-MODEL_URL=$(echo "$MODELS_RESPONSE" | jq -r '.data[0].url // empty' 2>/dev/null)
+MODEL_ID=$(echo "$MODELS_RESPONSE" | jq -r '.data[0].id // empty' 2>/dev/null)
 ```
 
 - PASS if MODEL_COUNT > 0
@@ -339,10 +339,10 @@ MODEL_URL=$(echo "$MODELS_RESPONSE" | jq -r '.data[0].url // empty' 2>/dev/null)
 ```bash
 INFERENCE_RESPONSE=$(curl -sk --connect-timeout 10 --max-time 60 \
     -w '\n%{http_code}' \
-    "${MODEL_URL}/v1/chat/completions" \
+    "${MAAS_URL}/v1/chat/completions" \
     -H "Authorization: Bearer ${API_KEY}" \
     -H "Content-Type: application/json" \
-    -d '{"model":"facebook/opt-125m","messages":[{"role":"user","content":"Say hello"}],"max_tokens":20}')
+    -d "{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello\"}],\"max_tokens\":20}")
 INFERENCE_CODE=$(echo "$INFERENCE_RESPONSE" | tail -1)
 INFERENCE_BODY=$(echo "$INFERENCE_RESPONSE" | sed '$d')
 ```

@@ -214,8 +214,25 @@ else
     log_fail "Gateway not Programmed (status: $GATEWAY_PROGRAMMED)"
 fi
 
-# Check and auto-fix gateway OOMKill
+# Check and auto-fix gateway OOMKill (maas-default-gateway)
 check_and_fix_gateway_oom "maas-default-gateway-openshift-default"
+
+# RHOAI gateways: warn if still at 1Gi or CrashLoopBackOff
+for gw_deploy in \
+    "data-science-gateway:data-science-gateway-data-science-gateway-class" \
+    "openshift-ai-inference:openshift-ai-inference-openshift-ai-inference"; do
+    gw_name="${gw_deploy%%:*}"
+    deploy_name="${gw_deploy##*:}"
+    gw_mem=$(oc get deployment "$deploy_name" -n openshift-ingress \
+        -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}' 2>/dev/null || echo "")
+    gw_ready=$(oc get pods -n openshift-ingress -l "gateway.networking.k8s.io/gateway-name=${gw_name}" \
+        -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+    if [ "$gw_mem" = "1Gi" ] || [ "$gw_ready" != "true" ]; then
+        log_warn "Gateway ${gw_name} may need 2Gi proxy memory — run setup-maas.sh Phase 4 or see Phase 2 OOMKill docs"
+    else
+        log_pass "Gateway ${gw_name} proxy healthy (${gw_mem})"
+    fi
+done
 
 # PostgreSQL
 PG_READY=$(oc get deployment postgres -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
@@ -544,33 +561,32 @@ if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ]; then
     MODELS_RESPONSE=$(maas_curl \
         -H "Authorization: Bearer ${API_KEY}" \
         -H "Content-Type: application/json" \
-        "${HOST}/maas-api/v1/models" 2>/dev/null || echo "{}")
+        "${HOST}/v1/models" 2>/dev/null || echo "{}")
 
     MODEL_COUNT=$(echo "$MODELS_RESPONSE" | jq '.data | length' 2>/dev/null || echo "0")
     MODEL_COUNT=$(echo "$MODEL_COUNT" | tr -d '[:space:]')
 
     if [ "$MODEL_COUNT" -gt 0 ] 2>/dev/null; then
         FIRST_MODEL_ID=$(echo "$MODELS_RESPONSE" | jq -r '.data[0].id // empty' 2>/dev/null || echo "")
-        MODEL_URL=$(echo "$MODELS_RESPONSE" | jq -r '.data[0].url // empty' 2>/dev/null || echo "")
         log_pass "Models available ($MODEL_COUNT total, first: $FIRST_MODEL_ID)"
         INFERENCE_MODEL="$FIRST_MODEL_ID"
     else
         log_fail "No models found in listing"
         log_warn "Response: ${MODELS_RESPONSE:0:200}"
         INFERENCE_MODEL="$MODEL_NAME"
-        MODEL_URL="${HOST}/v1/models/${MODEL_NAME}"
     fi
+    INFERENCE_URL="${HOST}/v1/chat/completions"
 fi
 
 # Test inference
-if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ] && [ -n "${MODEL_URL:-}" ]; then
+if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ] && [ -n "${INFERENCE_URL:-}" ]; then
     log_info "Testing inference..."
     INFERENCE_RESPONSE=$(maas_curl \
         -H "Authorization: Bearer ${API_KEY}" \
         -H "Content-Type: application/json" \
         -w "\n%{http_code}" \
         -d "{\"model\": \"${INFERENCE_MODEL:-$MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}], \"max_tokens\": 50}" \
-        "${MODEL_URL}/v1/chat/completions" 2>/dev/null || echo -e "\n000")
+        "${INFERENCE_URL}" 2>/dev/null || echo -e "\n000")
 
     INFERENCE_CODE=$(echo "$INFERENCE_RESPONSE" | tail -1)
     INFERENCE_BODY=$(echo "$INFERENCE_RESPONSE" | sed '$d')
@@ -592,13 +608,13 @@ fi
 # =============================================================================
 log_step "Phase 4: Auth enforcement"
 
-if [ -n "${MODEL_URL:-}" ]; then
+if [ -n "${INFERENCE_URL:-}" ]; then
     # No token
     NO_AUTH_CODE=$(maas_curl \
         -o /dev/null -w '%{http_code}' \
         -H "Content-Type: application/json" \
         -d "{\"model\": \"${INFERENCE_MODEL:-$MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}], \"max_tokens\": 10}" \
-        "${MODEL_URL}/v1/chat/completions" 2>/dev/null || echo "000")
+        "${INFERENCE_URL}" 2>/dev/null || echo "000")
 
     if [ "$NO_AUTH_CODE" = "401" ] || [ "$NO_AUTH_CODE" = "403" ]; then
         log_pass "Unauthenticated request rejected (HTTP $NO_AUTH_CODE)"
@@ -612,7 +628,7 @@ if [ -n "${MODEL_URL:-}" ]; then
         -H "Authorization: Bearer invalid-token-12345" \
         -H "Content-Type: application/json" \
         -d "{\"model\": \"${INFERENCE_MODEL:-$MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}], \"max_tokens\": 10}" \
-        "${MODEL_URL}/v1/chat/completions" 2>/dev/null || echo "000")
+        "${INFERENCE_URL}" 2>/dev/null || echo "000")
 
     if [ "$INVALID_CODE" = "401" ] || [ "$INVALID_CODE" = "403" ]; then
         log_pass "Invalid token rejected (HTTP $INVALID_CODE)"
@@ -620,7 +636,7 @@ if [ -n "${MODEL_URL:-}" ]; then
         log_fail "Invalid token returned HTTP $INVALID_CODE (expected 401/403)"
     fi
 else
-    log_fail "Skipping auth tests (no model URL)"
+    log_fail "Skipping auth tests (no inference URL)"
 fi
 
 # =============================================================================
@@ -628,7 +644,7 @@ fi
 # =============================================================================
 log_step "Phase 5: Rate limiting"
 
-if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ] && [ -n "${MODEL_URL:-}" ]; then
+if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ] && [ -n "${INFERENCE_URL:-}" ]; then
     log_info "Sending 16 rapid requests to trigger rate limit..."
     RATE_LIMITED=0
     SUCCESSES=0
@@ -638,7 +654,7 @@ if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ] && [ -n "${MODEL_URL:-}" ]; the
             -H "Authorization: Bearer ${API_KEY}" \
             -H "Content-Type: application/json" \
             -d "{\"model\": \"${INFERENCE_MODEL:-$MODEL_NAME}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello, write me a very long essay about the history of computing\"}], \"max_tokens\": 50}" \
-            "${MODEL_URL}/v1/chat/completions" 2>/dev/null || echo "000")
+            "${INFERENCE_URL}" 2>/dev/null || echo "000")
         if [ "$CODE" = "429" ]; then
             RATE_LIMITED=$((RATE_LIMITED + 1))
         elif [ "$CODE" = "200" ]; then

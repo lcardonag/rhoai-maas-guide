@@ -3,9 +3,10 @@
 # test-inference.sh - Quick smoke test for MaaS inference
 #
 # Usage:
-#   ./scripts/test-inference.sh --base-url <url> --api-key <key>
-#   ./scripts/test-inference.sh --base-url https://maas.apps.cluster.example.com/llm/model-name --api-key <key>
-#   ./scripts/test-inference.sh --base-url <url> --api-key <key> --model facebook/opt-125m --prompt "What is AI?"
+#   MAAS_URL="https://maas.apps.cluster.example.com"
+#   MODEL_ID=$(curl -sk "${MAAS_URL}/v1/models" -H "Authorization: Bearer ${API_KEY}" | jq -r '.data[0].id')
+#   ./scripts/test-inference.sh --base-url "${MAAS_URL}" --api-key "${API_KEY}" --model "${MODEL_ID}"
+#   ./scripts/test-inference.sh --base-url "${MAAS_URL}" --api-key "${API_KEY}" --list-models
 #
 
 set -euo pipefail
@@ -21,7 +22,7 @@ usage() {
     sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'
     echo ""
     echo "Options:"
-    echo "  --base-url URL      (required) MaaS base URL (e.g. https://maas.apps.cluster.example.com/llm/model-name)"
+    echo "  --base-url URL      (required) MaaS gateway root (e.g. https://maas.apps.cluster.example.com)"
     echo "  --api-key KEY       (required) MaaS API key"
     echo "  --model MODEL       vLLM model ID (default: $MODEL)"
     echo "  --prompt TEXT       Prompt text (default: \"$PROMPT\")"

@@ -1,17 +1,17 @@
 ---
 name: install-maas
 description: Install MaaS (Models as a Service) on a connected RHOAI cluster using this guide's Kustomize manifests and automation scripts.
-argument-hint: "[--model simulator|granite-tiny-gpu|gpt-oss-20b|auto] [--from-phase N] [--skip-models] [--skip-verify] [--with-observability]"
+argument-hint: "[--model simulator|granite-tiny-gpu|gpt-oss-20b|auto] [--from-phase N] [--skip-models] [--skip-verify] [--with-observability] [--with-compact-maas] [--with-litemaas]"
 allowed-tools: Bash(oc *), Bash(./*), Bash(envsubst *), Bash(curl *), Bash(jq *), Bash(grep *), Bash(ls *), Bash(cat *), Bash(date *), Bash(mkdir *), Bash(echo *), Bash(bash *), AskUserQuestion
 ---
 
 # Install MaaS on Connected RHOAI Cluster
 
-Install Models as a Service on an OpenShift cluster with RHOAI using this guide's all-in-one script. No ArgoCD required.
+Install Models as a Service on OpenShift with RHOAI using `./scripts/setup-maas.sh`.
+
+**Phases 1–4** = MaaS platform only. **Phase 5** deploys one **bundled** model (`simulator`, `granite-tiny-gpu`, `gpt-oss-20b`) unless any `LLMInferenceService` already exists — use `--skip-models` before GUI deploy or custom catalog models (e.g. Gemma).
 
 ## Primary Entry Point
-
-**`./scripts/setup-maas.sh`** is the single orchestrator that handles the entire lifecycle  - from operator installation through model deployment and verification. Each phase is idempotent; re-running skips what's already done.
 
 ```bash
 ./scripts/setup-maas.sh [OPTIONS]
@@ -19,111 +19,64 @@ Install Models as a Service on an OpenShift cluster with RHOAI using this guide'
 
 ## Arguments
 
-- `--model <name>` -- Model to deploy: `simulator` (CPU), `granite-tiny-gpu` (small GPU), `gpt-oss-20b` (large GPU), `auto` (auto-detect). Default: `auto`.
-- `--from-phase <N>` -- Start from phase N (0-7). Default: 0.
-- `--skip-models` -- Skip Phase 5 (model deployment).
-- `--skip-verify` -- Skip Phase 6 (verification).
-- `--with-observability` -- Also run Phase 7 (COO + telemetry).
-- `--dry-run` -- Preview without applying.
+- `--model <name>` — `simulator` | `granite-tiny-gpu` | `gpt-oss-20b` | `auto` (default: `auto`)
+- `--from-phase <N>` — Start from phase N (0–10; 9–10 = optional GUIs)
+- `--skip-models` — Skip Phase 5 (platform-only)
+- `--skip-verify` — Skip Phase 6
+- `--with-observability` — Phase 7
+- `--with-compact-maas` — Phase 10
+- `--with-litemaas` — Phase 9
+- `--dry-run` — Preview only
 
 ## Phases
 
-| Phase | What it does | Time |
-|-------|-------------|------|
-| 0 | Preflight  - detect cluster state, decide which phases to run | instant |
-| 1 | Operators  - `oc apply -k manifests/01-prerequisites/operators/`, wait for CSVs | 2-5 min |
-| 2 | Platform  - Kuadrant, UWM, GatewayClass, envsubst Gateway | 2-5 min |
-| 3 | RHOAI  - DSC with modelsAsService: Managed, Dashboard flags | 3-5 min |
-| 4 | MaaS  - PostgreSQL secrets/deployment, Authorino TLS, wait for maas-api | 3-5 min |
-| 5 | Model  - auto-detect GPU, apply Kustomize, wait for Ready | 0.5-15 min |
-| 6 | Verify  - 6-phase E2E (API, auth, rate limits, cleanup) | 3-5 min |
-| 7 | Observability  - COO subscription + Gateway TelemetryPolicy | 2-3 min |
+| Phase | What it does |
+|-------|-------------|
+| 0 | Preflight |
+| 1 | Operators (RHOAI, RHCL, cert-manager, LWS) |
+| 2 | Platform (Kuadrant, UWM, GatewayClass, MaaS gateway, 2Gi proxy memory, `default-gateway-tls`) |
+| 3 | PostgreSQL + secrets |
+| 4 | DSC `modelsAsService: Managed`, dashboard flags, wait for `maas-api` |
+| 5 | Bundled model + MaaS registration — **skipped** if any `LLMInferenceService` exists |
+| 6 | `verify.sh` E2E |
+| 7 | Observability (optional) |
+| 9–10 | LiteMaaS / Compact MaaS GUIs (optional) |
 
-## Instructions
-
-Run from the guide repo root (`rhoai-maas-guide/`).
-
-### Full Installation (Recommended)
-
-For a fresh cluster with no MaaS components:
+## Common patterns
 
 ```bash
-./scripts/setup-maas.sh
-```
+# Platform only — then GUI with Publish as MaaS
+./scripts/setup-maas.sh --skip-models
 
-This runs Phases 0-6 automatically. The script detects what's already installed and skips completed phases.
+# Full bundled validation
+./scripts/setup-maas.sh --model simulator
 
-### With Observability
-
-```bash
-./scripts/setup-maas.sh --with-observability
-```
-
-### Resume from a Specific Phase
-
-If a previous run failed at Phase 4:
-
-```bash
+# Resume
 ./scripts/setup-maas.sh --from-phase 4
 ```
 
-### Models Only
-
-If the platform is already installed and you just want to deploy a model:
+## Inference test (after model registered)
 
 ```bash
-./scripts/setup-maas.sh --from-phase 5
+MAAS_URL="https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
+API_KEY=$(curl -sk -X POST "${MAAS_URL}/maas-api/v1/api-keys" \
+  -H "Authorization: Bearer $(oc whoami -t)" -H "Content-Type: application/json" \
+  -d '{"name":"test","subscription":"<sub>","expiresIn":"1h"}' | jq -r '.key')
+MODEL_ID=$(curl -sk "${MAAS_URL}/v1/models" -H "Authorization: Bearer ${API_KEY}" | jq -r '.data[0].id')
+curl -sk "${MAAS_URL}/v1/chat/completions" \
+  -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+  -d "{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":20}"
 ```
 
-Or use the standalone model script for more control:
-
-```bash
-./scripts/deploy-model.sh --model simulator
-```
-
-### Verify Only
-
-```bash
-./scripts/setup-maas.sh --from-phase 6
-```
-
-Or directly:
-
-```bash
-./manifests/06-verification/verify.sh
-```
-
-## Convenience Scripts
-
-These wrap individual phases for standalone use:
-
-| Script | What it does |
-|--------|-------------|
-| `scripts/deploy-model.sh` | Phase 5 only  - deploy model with GPU auto-detection |
-| `scripts/verify-maas.sh` | Phase 6 only  - wrapper for `manifests/06-verification/verify.sh` |
-
-## State Detection
-
-Phase 0 inspects the cluster and reports what's installed. The script uses this to skip phases:
-
-- Operators installed? Skip Phase 1.
-- Kuadrant + UWM + Gateway ready? Skip Phase 2.
-- DSC with modelsAsService: Managed? Skip Phase 3.
-- PostgreSQL + maas-api running? Skip Phase 4.
-- Models deployed in llm namespace? Skip Phase 5.
-
-Override with `--from-phase N` to force re-running from a specific phase.
+Use `.key` (not `.token`). List at `/v1/models`; infer at `/v1/chat/completions`.
 
 ## Troubleshooting
 
-If a phase fails, the script reports what went wrong. Common fixes:
-
-- **Operator CSV stuck**: Check `oc get csv -A --no-headers | grep -v Succeeded`
-- **Gateway not Programmed**: Check `oc get gateway -n openshift-ingress -o yaml`
-- **maas-api not appearing**: Check `oc get datasciencecluster default-dsc -o jsonpath='{.status.conditions}'`
-- **Health endpoint 000**: DNS propagation for LoadBalancer  - wait 2-5 minutes
-- **Model pods CrashLoopBackOff**: Check GPU resources with `oc describe pod -n llm`
+- **Duplicate OperatorGroup** in `redhat-ods-operator` — keep one; see Phase 4 docs
+- **Gateway OOM** — all three gateways need 2Gi; re-run `--from-phase 4`
+- **maas-api** — RHOAI 3.5+: namespace `redhat-ai-gateway-infra`; 3.4: `redhat-ods-applications`
+- **GUI model not in MaaS** — deploy after `maas-api` healthy; or register manually (Phase 5 Path C)
 
 ## Final Report
 
-The script ends with a summary: RHOAI version, MaaS API URL, Gateway status, health check, deployed models, and suggested next steps.
+Script prints RHOAI version, MaaS URL, gateway status, health check, and next steps.

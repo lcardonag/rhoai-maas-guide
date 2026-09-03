@@ -198,6 +198,125 @@ wait_for() {
     log_info "$desc: done"
 }
 
+# OpenShift AI's openshift-ai-inference Gateway references default-gateway-tls, but
+# cert-manager-based ingress uses a differently named secret (e.g. cert-manager-ingress-cert).
+ensure_default_gateway_tls() {
+    local ingress_ns="openshift-ingress"
+    local target_secret="default-gateway-tls"
+    local source_secret="${CERT_NAME:-router-certs-default}"
+
+    [ "$source_secret" = "$target_secret" ] && return 0
+
+    if ! oc get secret "$source_secret" -n "$ingress_ns" &>/dev/null; then
+        log_warn "Ingress TLS secret ${source_secret} not found; skipping ${target_secret} sync"
+        return 0
+    fi
+
+    if oc get secret "$target_secret" -n "$ingress_ns" &>/dev/null; then
+        log_info "Secret ${target_secret} already exists in ${ingress_ns}, skipping"
+        return 0
+    fi
+
+    log_step "Creating ${target_secret} from ${source_secret} (OpenShift AI inference gateway TLS)..."
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would create secret ${target_secret} from ${source_secret}"
+        return 0
+    fi
+
+    local cert_file key_file
+    cert_file=$(mktemp)
+    key_file=$(mktemp)
+    oc get secret "$source_secret" -n "$ingress_ns" -o jsonpath='{.data.tls\.crt}' | base64 -d > "$cert_file"
+    oc get secret "$source_secret" -n "$ingress_ns" -o jsonpath='{.data.tls\.key}' | base64 -d > "$key_file"
+    oc create secret tls "$target_secret" \
+        --cert="$cert_file" --key="$key_file" \
+        -n "$ingress_ns" --dry-run=client -o yaml | oc apply -f -
+    rm -f "$cert_file" "$key_file"
+
+    log_info "Secret ${target_secret} created"
+
+    if oc get gateway openshift-ai-inference -n "$ingress_ns" &>/dev/null; then
+        if wait_for "openshift-ai-inference Gateway HTTPS listener" 60 \
+            oc wait gateway/openshift-ai-inference -n "$ingress_ns" \
+            --for=jsonpath='{.status.listeners[?(@.name=="https")].conditions[?(@.type=="Programmed")].status}'=True; then
+            log_info "openshift-ai-inference Gateway HTTPS listener: Programmed"
+        else
+            log_warn "openshift-ai-inference Gateway HTTPS listener not yet Programmed"
+        fi
+    fi
+}
+
+# RHOAI 3.5+ Gateways (data-science-gateway, openshift-ai-inference) default to 1Gi and
+# OOMKill when Kuadrant Wasm loads. maas-default-gateway uses maas-gateway-options instead.
+ensure_rhoai_gateway_proxy_memory() {
+    local ingress_ns="openshift-ingress"
+    local rhoai_cm="openshift-ai-inference-gateway-options"
+    local ds_cm="data-science-gateway-config"
+    local deployment_patch='spec:
+  template:
+    spec:
+      containers:
+      - name: istio-proxy
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+'
+
+    log_step "Ensuring RHOAI gateway proxy memory limits (2Gi)..."
+
+    if [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would apply ${rhoai_cm} and patch RHOAI gateway ConfigMaps"
+        return 0
+    fi
+
+    run_cmd oc apply -f "$MANIFESTS_DIR/02-platform-config/rhoai-gateway-resources.yaml"
+
+    if oc get gateway openshift-ai-inference -n "$ingress_ns" &>/dev/null; then
+        local params_ref
+        params_ref=$(oc get gateway openshift-ai-inference -n "$ingress_ns" \
+            -o jsonpath='{.spec.infrastructure.parametersRef.name}' 2>/dev/null || echo "")
+        if [ "$params_ref" != "$rhoai_cm" ]; then
+            run_cmd oc patch gateway openshift-ai-inference -n "$ingress_ns" --type=merge -p "{
+              \"spec\": {\"infrastructure\": {\"parametersRef\": {
+                \"group\": \"\", \"kind\": \"ConfigMap\", \"name\": \"${rhoai_cm}\"
+              }}}
+            }"
+        fi
+    fi
+
+    if oc get configmap "$ds_cm" -n "$ingress_ns" &>/dev/null; then
+        local ds_mem has_deploy
+        ds_mem=$(oc get deployment data-science-gateway-data-science-gateway-class -n "$ingress_ns" \
+            -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}' 2>/dev/null || echo "")
+        has_deploy=$(oc get configmap "$ds_cm" -n "$ingress_ns" \
+            -o jsonpath='{.data.deployment}' 2>/dev/null || echo "")
+        if [ -z "$has_deploy" ] || [ "$ds_mem" != "2Gi" ]; then
+            run_cmd oc patch configmap "$ds_cm" -n "$ingress_ns" --type=merge -p "$(python3 -c "
+import json, sys
+print(json.dumps({'data': {'deployment': sys.stdin.read()}}))
+" <<< "$deployment_patch")"
+        fi
+    fi
+
+    for gw in data-science-gateway openshift-ai-inference; do
+        local reason restarts
+        reason=$(oc get pods -n "$ingress_ns" -l "gateway.networking.k8s.io/gateway-name=${gw}" \
+            -o jsonpath='{.items[0].status.containerStatuses[0].lastState.terminated.reason}' 2>/dev/null || echo "")
+        restarts=$(oc get pods -n "$ingress_ns" -l "gateway.networking.k8s.io/gateway-name=${gw}" \
+            -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo "0")
+        if [ "$reason" = "OOMKilled" ] || [ "${restarts:-0}" -ge 3 ]; then
+            log_warn "Restarting ${gw} gateway pod after OOM/restarts (${restarts})"
+            oc delete pod -n "$ingress_ns" -l "gateway.networking.k8s.io/gateway-name=${gw}" --wait=false 2>/dev/null || true
+        fi
+    done
+
+    log_info "RHOAI gateway proxy memory limits applied"
+}
+
 # =============================================================================
 # Phase 0: Preflight
 # =============================================================================
@@ -232,6 +351,7 @@ HAS_UWM=false
 HAS_GATEWAY_CLASS=false
 HAS_GATEWAY=false
 HAS_DSC=false
+HAS_DSCI=false
 HAS_MAAS_MANAGED=false
 HAS_POSTGRES=false
 HAS_MAAS_API=false
@@ -258,14 +378,18 @@ echo "$UWM_CFG" | grep enableUserWorkload >/dev/null 2>&1 && HAS_UWM=true
 oc get gatewayclass openshift-default &>/dev/null && HAS_GATEWAY_CLASS=true
 oc get gateway maas-default-gateway -n openshift-ingress &>/dev/null && HAS_GATEWAY=true
 oc get datasciencecluster default-dsc &>/dev/null && HAS_DSC=true
+oc get dsci default-dsci &>/dev/null && HAS_DSCI=true
 if [ "$HAS_DSC" = true ]; then
-    MAAS_STATE=$(oc get datasciencecluster default-dsc -o jsonpath='{.spec.components.kserve.modelsAsService.managementState}' 2>/dev/null || echo "")
+    MAAS_STATE=$(oc get datasciencecluster default-dsc -o jsonpath='{.spec.components.aigateway.modelsAsAService.managementState}' 2>/dev/null || echo "")
+    [ -z "$MAAS_STATE" ] && MAAS_STATE=$(oc get datasciencecluster default-dsc -o jsonpath='{.spec.components.kserve.modelsAsService.managementState}' 2>/dev/null || echo "")
     [ "$MAAS_STATE" = "Managed" ] && HAS_MAAS_MANAGED=true
 fi
 oc get deployment postgres -n "$NAMESPACE" &>/dev/null && HAS_POSTGRES=true
 oc get deployment maas-api -n "$NAMESPACE" &>/dev/null && HAS_MAAS_API=true
+oc get deployment maas-api -n redhat-ai-gateway-infra &>/dev/null && HAS_MAAS_API=true
+oc get deployment maas-controller -n "$NAMESPACE" &>/dev/null && HAS_MAAS_API=true
 oc get tenant -n models-as-a-service &>/dev/null && HAS_TENANT=true
-MODEL_COUNT=$(oc get llminferenceservice -n llm --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+MODEL_COUNT=$(oc get llminferenceservice -A --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
 [ "$MODEL_COUNT" -gt 0 ] 2>/dev/null && HAS_MODELS=true
 METALLB_CSVS=$(oc get csv -n metallb-system --no-headers 2>/dev/null || true)
 echo "$METALLB_CSVS" | grep "metallb-operator" >/dev/null 2>&1 && HAS_METALLB=true
@@ -279,6 +403,7 @@ log_info "  User Workload Mon:  $([ "$HAS_UWM" = true ] && echo "enabled" || ech
 log_info "  GatewayClass:       $([ "$HAS_GATEWAY_CLASS" = true ] && echo "exists" || echo "not found")"
 log_info "  Gateway:            $([ "$HAS_GATEWAY" = true ] && echo "exists" || echo "not found")"
 log_info "  DataScienceCluster: $([ "$HAS_DSC" = true ] && echo "exists" || echo "not found")"
+log_info "  DSCInitialization:  $([ "$HAS_DSCI" = true ] && echo "exists" || echo "not found")"
 log_info "  modelsAsService:    $([ "$HAS_MAAS_MANAGED" = true ] && echo "Managed" || echo "not managed")"
 log_info "  PostgreSQL:         $([ "$HAS_POSTGRES" = true ] && echo "running" || echo "not deployed")"
 log_info "  maas-api:           $([ "$HAS_MAAS_API" = true ] && echo "running" || echo "not deployed")"
@@ -310,8 +435,28 @@ if should_run 1; then
     if [ "$HAS_RHOAI_CSV" = true ] && [ "$HAS_RHCL_CSV" = true ]; then
         log_info "Required operators already installed, skipping"
     else
+        if oc get operatorgroup redhat-ods-operator -n redhat-ods-operator &>/dev/null && \
+           oc get operatorgroup redhat-ods-operator-og -n redhat-ods-operator &>/dev/null; then
+            log_error "Duplicate OperatorGroups in redhat-ods-operator (redhat-ods-operator + redhat-ods-operator-og)."
+            log_error "This breaks the RHOAI CSV. Fix before continuing:"
+            log_error "  oc delete operatorgroup redhat-ods-operator -n redhat-ods-operator"
+            log_error "  oc delete csv rhods-operator.3.5.0 -n redhat-ods-operator  # if phase is Failed"
+            log_error "Then re-run: ./scripts/setup-maas.sh --from-phase 1"
+            exit 1
+        fi
+
+        HAS_RHOAI_SUB=false
+        oc get subscription rhods-operator -n redhat-ods-operator &>/dev/null && HAS_RHOAI_SUB=true
+
         log_info "Applying operator subscriptions..."
-        run_cmd oc apply -k "$MANIFESTS_DIR/01-prerequisites/operators/"
+        for op_dir in cert-manager connectivity-link leader-worker-set; do
+            run_cmd oc apply -k "$MANIFESTS_DIR/01-prerequisites/operators/$op_dir/"
+        done
+        if [ "$HAS_RHOAI_SUB" = true ]; then
+            log_info "RHOAI subscription already exists — skipping rhoai-operator manifests (avoids duplicate OperatorGroup)"
+        else
+            run_cmd oc apply -k "$MANIFESTS_DIR/01-prerequisites/operators/rhoai-operator/"
+        fi
         log_info "Operator subscriptions applied"
 
         log_info "Waiting for operator CSVs (this may take 5-10 minutes)..."
@@ -573,6 +718,9 @@ if should_run 2; then
 
     # Label redhat-ods-applications for Gateway route binding (best practice: least privilege)
     oc label namespace redhat-ods-applications maas.opendatahub.io/gateway-access=true --overwrite 2>/dev/null || true
+
+    ensure_default_gateway_tls
+    ensure_rhoai_gateway_proxy_memory
 fi
 
 # =============================================================================
@@ -654,10 +802,49 @@ if should_run 4; then
     if [ "$HAS_MAAS_MANAGED" = true ]; then
         log_info "DSC already has modelsAsService: Managed, skipping"
     else
-        log_step "Applying DSC and DSCI..."
-        run_cmd oc apply -f "$MANIFESTS_DIR/04-rhoai-config/dscinitialization.yaml"
-        run_cmd oc apply -f "$MANIFESTS_DIR/04-rhoai-config/datasciencecluster.yaml"
-        log_info "DSC/DSCI applied"
+        if [ "$HAS_DSCI" = true ]; then
+            log_info "DSCInitialization default-dsci already exists, skipping"
+        else
+            log_step "Applying DSCInitialization..."
+            run_cmd oc apply -f "$MANIFESTS_DIR/04-rhoai-config/dscinitialization.yaml"
+        fi
+
+        if [ "$HAS_DSC" = true ]; then
+            RHOAI_VER=$(oc get csv -n redhat-ods-operator -l 'operators.coreos.com/rhods-operator.redhat-ods-operator=' \
+                -o jsonpath='{.items[0].spec.version}' 2>/dev/null || echo "0.0.0")
+            if printf '%s\n%s' "$RHOAI_VER" "3.5.0" | sort -V | head -1 | grep -q '^3\.5\.0$' && [ "$RHOAI_VER" != "0.0.0" ]; then
+                log_step "Patching existing DataScienceCluster to enable MaaS via aigateway (RHOAI ${RHOAI_VER})..."
+                run_cmd oc patch datasciencecluster default-dsc --type=merge -p '{
+                  "spec": {
+                    "components": {
+                      "aigateway": {
+                        "managementState": "Managed",
+                        "modelsAsAService": {
+                          "managementState": "Managed"
+                        }
+                      }
+                    }
+                  }
+                }'
+            else
+                log_step "Patching existing DataScienceCluster to enable modelsAsService (RHOAI ${RHOAI_VER})..."
+                run_cmd oc patch datasciencecluster default-dsc --type=merge -p '{
+                  "spec": {
+                    "components": {
+                      "kserve": {
+                        "modelsAsService": {
+                          "managementState": "Managed"
+                        }
+                      }
+                    }
+                  }
+                }'
+            fi
+        else
+            log_step "Applying DataScienceCluster..."
+            run_cmd oc apply -f "$MANIFESTS_DIR/04-rhoai-config/datasciencecluster.yaml"
+        fi
+        log_info "DSC/DSCI configured for MaaS"
 
         if [ "$DRY_RUN" = false ]; then
             log_info "Waiting for KserveReady condition (up to 5 minutes)..."
@@ -678,7 +865,21 @@ if should_run 4; then
         fi
 
         log_step "Applying OdhDashboardConfig..."
-        run_cmd oc apply -f "$MANIFESTS_DIR/04-rhoai-config/odh-dashboard-config.yaml"
+        RHOAI_VER_DASH=$(oc get csv -n redhat-ods-operator -l 'operators.coreos.com/rhods-operator.redhat-ods-operator=' \
+            -o jsonpath='{.items[0].spec.version}' 2>/dev/null || echo "0.0.0")
+        if printf '%s\n%s' "$RHOAI_VER_DASH" "3.5.0" | sort -V | head -1 | grep -q '^3\.5\.0$' && [ "$RHOAI_VER_DASH" != "0.0.0" ]; then
+            log_info "RHOAI ${RHOAI_VER_DASH}: patching dashboard flags only (deprecated keys omitted for 3.5+)"
+            run_cmd oc patch odhdashboardconfig odh-dashboard-config -n "$NAMESPACE" --type=merge -p '{
+              "spec": {
+                "dashboardConfig": {
+                  "modelAsService": true,
+                  "genAiStudio": true
+                }
+              }
+            }'
+        else
+            run_cmd oc apply -f "$MANIFESTS_DIR/04-rhoai-config/odh-dashboard-config.yaml"
+        fi
         if [ "$DRY_RUN" = false ]; then
             for _attempt in 1 2 3; do
                 sleep 10
@@ -686,33 +887,48 @@ if should_run 4; then
                     -o jsonpath='{.spec.dashboardConfig.modelAsService}' 2>/dev/null || echo "")
                 if [ "$MAAS_FLAG" = "true" ]; then break; fi
                 log_warn "Dashboard config flags overridden by operator — re-applying (attempt $_attempt)..."
-                oc apply -f "$MANIFESTS_DIR/04-rhoai-config/odh-dashboard-config.yaml" 2>/dev/null || true
+                if printf '%s\n%s' "$RHOAI_VER_DASH" "3.5.0" | sort -V | head -1 | grep -q '^3\.5\.0$' && [ "$RHOAI_VER_DASH" != "0.0.0" ]; then
+                    oc patch odhdashboardconfig odh-dashboard-config -n "$NAMESPACE" --type=merge -p '{"spec":{"dashboardConfig":{"modelAsService":true}}}' 2>/dev/null || true
+                else
+                    oc apply -f "$MANIFESTS_DIR/04-rhoai-config/odh-dashboard-config.yaml" 2>/dev/null || true
+                fi
             done
         fi
         log_info "Dashboard config applied"
     fi
 
-    # Wait for maas-api (should start healthy since PostgreSQL was deployed in Phase 3)
-    log_step "Waiting for maas-api deployment"
+    # Wait for maas-api (3.4: redhat-ods-applications; 3.5+: redhat-ai-gateway-infra)
+    log_step "Waiting for MaaS API deployment"
     if [ "$HAS_MAAS_API" = true ]; then
-        log_info "maas-api already running"
+        log_info "MaaS API/controller already running"
     elif [ "$DRY_RUN" = false ]; then
         TIMEOUT=300
         ELAPSED=0
         while [ $ELAPSED -lt $TIMEOUT ]; do
-            if oc get deployment maas-api -n "$NAMESPACE" &>/dev/null; then
-                log_info "maas-api deployment found"
-                oc rollout status deployment/maas-api -n "$NAMESPACE" --timeout=180s 2>/dev/null || \
-                    log_warn "maas-api rollout did not complete within 180s"
+            MAAS_DEPLOY=""
+            for candidate in "redhat-ai-gateway-infra/maas-api" "$NAMESPACE/maas-api" "$NAMESPACE/maas-controller"; do
+                dep_ns="${candidate%%/*}"
+                dep_name="${candidate##*/}"
+                if oc get deployment "$dep_name" -n "$dep_ns" &>/dev/null; then
+                    MAAS_DEPLOY="$candidate"
+                    break
+                fi
+            done
+            if [ -n "$MAAS_DEPLOY" ]; then
+                dep_ns="${MAAS_DEPLOY%%/*}"
+                dep_name="${MAAS_DEPLOY##*/}"
+                log_info "MaaS deployment found: ${dep_name} (${dep_ns})"
+                oc rollout status deployment/"$dep_name" -n "$dep_ns" --timeout=180s 2>/dev/null || \
+                    log_warn "MaaS deployment rollout did not complete within 180s"
                 break
             fi
             sleep 10
             ELAPSED=$((ELAPSED + 10))
             if [ $((ELAPSED % 60)) -eq 0 ]; then
-                log_info "Still waiting for maas-api... (${ELAPSED}s)"
+                log_info "Still waiting for MaaS API... (${ELAPSED}s)"
             fi
         done
-        [ $ELAPSED -ge $TIMEOUT ] && log_warn "maas-api not found after ${TIMEOUT}s  - operator may still be reconciling"
+        [ $ELAPSED -ge $TIMEOUT ] && log_warn "MaaS API not found after ${TIMEOUT}s  - operator may still be reconciling"
     fi
 
     # Verify Tenant CR
@@ -738,6 +954,9 @@ if should_run 4; then
             log_warn "Health endpoint: HTTP ${HTTP_CODE} (may need DNS propagation)"
         fi
     fi
+
+    ensure_default_gateway_tls
+    ensure_rhoai_gateway_proxy_memory
 fi
 
 # =============================================================================
@@ -747,9 +966,13 @@ if should_run 5 && [ "$SKIP_MODELS" = false ]; then
     log_phase 5 "Deploy Model"
 
     if [ "$HAS_MODELS" = true ]; then
-        log_info "Models already deployed in llm namespace:"
-        oc get llminferenceservice -n llm --no-headers 2>/dev/null || true
-        log_info "Skipping model deployment (use --from-phase 5 to force)"
+        log_info "LLMInferenceService(s) already deployed (skipping guide model manifests):"
+        oc get llminferenceservice -A --no-headers 2>/dev/null | while read -r line; do
+            log_info "  $line"
+        done
+        log_info "Phase 5 only deploys bundled models (simulator, granite-tiny-gpu, gpt-oss-20b)."
+        log_info "For custom models: deploy with Publish as MaaS after platform is ready, or see manifests/05-maas-models/README.md"
+        log_info "To force a guide model, delete existing LLMInferenceServices first"
     else
         # Auto-detect model
         if [ "$MODEL" = "auto" ]; then
@@ -1255,9 +1478,9 @@ else
     log_info "maas-api:      ${API_READY} replica(s)"
     log_info "Health:        HTTP ${HEALTH}"
 
-    if [ "$SKIP_MODELS" = false ] && [ "$HAS_MODELS" = true ] || oc get llminferenceservice -n llm &>/dev/null 2>&1; then
+    if [ "$SKIP_MODELS" = false ] && { [ "$HAS_MODELS" = true ] || oc get llminferenceservice -A --no-headers 2>/dev/null | grep -q .; }; then
         log_info "Models (local):"
-        oc get llminferenceservice -n llm --no-headers 2>/dev/null | while read -r line; do
+        oc get llminferenceservice -A --no-headers 2>/dev/null | while read -r line; do
             log_info "  $line"
         done
     fi

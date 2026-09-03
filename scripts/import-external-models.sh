@@ -28,7 +28,7 @@
 # IBM RHAI: after import, also apply
 #   manifests/08-external-models/openai-compatible-prefixed/ibm-rhai-upstream-path-prefix-envoyfilter.yaml
 # URLRewrite alone is insufficient — BBR drops the project path prefix (empty 404).
-# See 08-external-models.adoc (ibm-rhai-envoyfilter).
+# See docs/08-external-models.md (ibm-rhai-envoyfilter).
 #
 # See --help for the full option list.
 #

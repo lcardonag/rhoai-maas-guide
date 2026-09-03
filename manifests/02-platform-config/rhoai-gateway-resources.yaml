@@ -1,0 +1,25 @@
+# Istio proxy memory overrides for RHOAI-managed Gateways (not maas-default-gateway).
+# Kuadrant Wasm extensions exceed the default 1Gi limit and cause OOMKilled (exit 137).
+#
+# - openshift-ai-inference: apply this ConfigMap and set Gateway.spec.infrastructure.parametersRef
+# - data-science-gateway: patch the operator-owned data-science-gateway-config ConfigMap
+#   (see scripts/setup-maas.sh ensure_rhoai_gateway_proxy_memory)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshift-ai-inference-gateway-options
+  namespace: openshift-ingress
+data:
+  deployment: |
+    spec:
+      template:
+        spec:
+          containers:
+          - name: istio-proxy
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: "2"
+                memory: 2Gi

@@ -19,7 +19,7 @@ BBR/payload-processing rewrites upstream `:path` to `/v1/chat/completions`, so g
 oc apply -f ibm-rhai-upstream-path-prefix-envoyfilter.yaml
 ```
 
-Lua runs after `ext_proc.bbr` on Gateway `maas-default-gateway` (`openshift-ingress`). Edit the hardcoded project UUID and model list in that file when your IBM project changes. See Antora **Phase 8** → *IBM RHAI: durable upstream path prefix*.
+Lua runs after `ext_proc.bbr` on Gateway `maas-default-gateway` (`openshift-ingress`). Edit the hardcoded project UUID and model list in that file when your IBM project changes. See [Phase 8: IBM RHAI EnvoyFilter](../../../docs/08-external-models.md#ibm-rhai-envoyfilter).
 
 Test with a MaaS `*-free` subscription key (not the IBM key), prefer `--http1.1`. IBM may return HTTP **202** with completed choices — that is success.
 
@@ -45,8 +45,8 @@ oc apply -f maas-subscription.yaml
 oc apply -f ibm-rhai-upstream-path-prefix-envoyfilter.yaml
 ```
 
-See Antora page **Phase 8: External Models** (`08-external-models.adoc`).
+See [Phase 8: External Models](../../../docs/08-external-models.md).
 
 ## Removing a model
 
-Deleting these resources is not a plain `oc delete -f` of the same files (order matters, and the credential Secret is often shared across models on the same endpoint). See the **Removing an external model** section on the `08-external-models.adoc` Antora page for the ordered teardown and copy-paste `oc delete` examples.
+Deleting these resources is not a plain `oc delete -f` of the same files (order matters, and the credential Secret is often shared across models on the same endpoint). See the [Removing an external model](../../../docs/08-external-models.md#removing-an-external-model) section for the ordered teardown and copy-paste `oc delete` examples.
