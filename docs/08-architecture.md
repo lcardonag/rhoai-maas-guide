@@ -6,6 +6,8 @@ This page explains how Red Hat OpenShift AI Models as a Service works under the 
 
 > **Important:** This guide is not a replacement for the [official Red Hat OpenShift AI Models as a Service documentation](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index). It is a companion resource with opinionated Kustomize manifests and automation scripts to accelerate deployment.
 
+> **See also:** [MaaS Namespaces Reference](./maas-namespaces.md) — which namespaces RHOAI creates vs. which you create (`llm`, `external-models`), and how they connect during inference and API-key minting.
+
 ## Component Overview
 
 Models as a Service is built from four layers, each with a distinct responsibility:

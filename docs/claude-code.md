@@ -39,11 +39,12 @@ All arguments from `setup-maas.sh` are supported:
 | Option | Description |
 | --- | --- |
 | `--model <name>` | Model to deploy: `simulator` (CPU), `granite-tiny-gpu`, `gpt-oss-20b`, `auto` |
-| `--from-phase <N>` | Start from phase N (0–10; Phases 9–10 are optional GUIs) |
+| `--from-phase <N>` | Start from phase N (0–11; Phases 9–11 are optional) |
 | `--skip-models` | Skip Phase 5 (platform-only; use before GUI deploy or custom catalog models) |
 | `--skip-verify` | Skip Phase 6 (verification) |
 | `--with-observability` | Also run Phase 7 (COO + telemetry) |
 | `--with-compact-maas` | Also run Phase 10 (Compact MaaS GUI) |
+| `--with-lago-billing` | Also run Phase 11 (Lago billing; auto Phase 7 if telemetry missing) |
 | `--with-litemaas` | Also run Phase 9 (LiteMaaS PoC) |
 
 ## What the Skill Does

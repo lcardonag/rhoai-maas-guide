@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-billing-config
+  namespace: maas-billing
+  labels:
+    app.kubernetes.io/part-of: maas-billing
+    maas-billing/backend: openmeter
+data:
+  BILLING_BACKEND: openmeter
+  MAAS_SUBSCRIPTION_NAMESPACE: models-as-a-service
+  TIER_TEMPLATES_CONFIGMAP: maas-billing-tier-templates
+  TIER_TEMPLATES_NAMESPACE: maas-billing
+  CATALOG_PROFILE: standard
+  DATABASE_PATH: /data/entities-openmeter.db
+  OPENMETER_URL: http://openmeter-api.openmeter.svc
+  OPENMETER_FEATURE_KEY: llm_tokens
+  OPENMETER_EVENT_TYPE: maas.tokens.consumed
+  BILLING_API_URL: http://maas-billing-api.maas-billing.svc:8080
+  PROMETHEUS_URL: https://thanos-querier.openshift-monitoring.svc:9091
+  REPORTER_PROMQL: sum by (subscription, user, model) (increase(authorized_hits{subscription=~"budget-.*"}[2m]))
+  REPORTER_INTERVAL_SECONDS: "120"
+  ENFORCER_INTERVAL_SECONDS: "60"

@@ -1,0 +1,79 @@
+# OpenShift-friendly Lago Helm values for rhoai-maas-guide Phase 11.
+# Rendered by scripts/install-lago-platform.sh (envsubst for URLs).
+# Chart: https://charts.getlago.com/
+#
+# Sandbox: install-lago-platform.sh applies postgres-redis.yaml in namespace lago
+# first, then passes global.databaseUrl / global.redisUrl below.
+# Production: set LAGO_DATABASE_URL and LAGO_REDIS_URL before install.
+
+version: "1.32.4"
+
+apiUrl: "https://lago-api.${CLUSTER_DOMAIN}"
+frontUrl: "https://lago.${CLUSTER_DOMAIN}"
+
+global:
+  databaseUrl: "postgresql://lago:lago@postgres.lago.svc.cluster.local:5432/lago"
+  redisUrl: "redis://redis.lago.svc.cluster.local:6379"
+  signup:
+    enabled: false
+  ingress:
+    enabled: false
+  s3:
+    enabled: false
+  segment:
+    enabled: false
+
+job:
+  migrate:
+    loadSchema: true
+
+api:
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 200m
+
+worker:
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 200m
+
+front:
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+
+billingWorker:
+  enabled: true
+clockWorker:
+  enabled: true
+eventsWorker:
+  enabled: true
+pdfWorker:
+  enabled: true
+webhookWorker:
+  enabled: true
+paymentWorker:
+  enabled: true

@@ -14,6 +14,8 @@
 #   Phase 8: External models (optional) - deploy ExternalModel (e.g. OpenAI, Gemini)
 #   Phase 9: LiteMaaS + LiteLLM (optional) - sibling repo litemaas-rhoai
 #   Phase 10: Compact MaaS (optional) - thin UI/BFF, no LiteLLM (sibling compact-maas)
+#   Phase 11: Lago billing (optional) - budget entities, usage-reporter, budget-enforcer
+#   Phase 12: OpenMeter billing (optional) - same enforcement model, Apache metering
 #
 # Each phase is idempotent  - re-running skips what's already done.
 #
@@ -30,6 +32,10 @@
 #   --with-litemaas      Also run Phase 9 (LiteMaaS + LiteLLM GUI PoC)
 #   --with-compact-maas  Also run Phase 10 (Compact MaaS, no LiteLLM)
 #   --with-maas-console  Deprecated alias for --with-compact-maas
+#   --with-lago-billing  Also run Phase 11 (Lago + MaaS billing scaffold)
+#   --skip-lago-platform Skip Helm install of Lago (use external Lago; still applies maas-billing base)
+#   --with-openmeter-billing Also run Phase 12 (OpenMeter + MaaS billing scaffold)
+#   --skip-openmeter-platform Skip OpenMeter Helm install (external; still applies maas-billing base)
 #   --external-model-api-key <key>  API key for external provider (or EXTERNAL_MODEL_API_KEY env var)
 #   --dry-run            Preview without applying
 #   -h, --help           Show this help message
@@ -47,6 +53,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUIDE_DIR="$SCRIPT_DIR/.."
 MANIFESTS_DIR="$GUIDE_DIR/manifests"
 NAMESPACE=redhat-ods-applications
+# shellcheck source=lib/maas-observability.sh
+source "$SCRIPT_DIR/lib/maas-observability.sh"
+# shellcheck source=lib/maas-billing.sh
+source "$SCRIPT_DIR/lib/maas-billing.sh"
 
 # Colors
 GREEN='\033[0;32m'
@@ -70,6 +80,10 @@ WITH_OBSERVABILITY=false
 WITH_EXTERNAL_MODELS=false
 WITH_LITEMAAS=false
 WITH_COMPACT_MAAS=false
+WITH_LAGO_BILLING=false
+SKIP_LAGO_PLATFORM=false
+WITH_OPENMETER_BILLING=false
+SKIP_OPENMETER_PLATFORM=false
 EXTERNAL_MODEL_PROVIDER="${EXTERNAL_MODEL_PROVIDER:-openai}"
 EXTERNAL_MODEL_API_KEY="${EXTERNAL_MODEL_API_KEY:-}"
 DRY_RUN=false
@@ -89,6 +103,10 @@ while [[ $# -gt 0 ]]; do
         --with-external-models) WITH_EXTERNAL_MODELS=true; shift ;;
         --with-litemaas) WITH_LITEMAAS=true; shift ;;
         --with-compact-maas|--with-maas-console) WITH_COMPACT_MAAS=true; shift ;;
+        --with-lago-billing) WITH_LAGO_BILLING=true; shift ;;
+        --skip-lago-platform) SKIP_LAGO_PLATFORM=true; shift ;;
+        --with-openmeter-billing) WITH_OPENMETER_BILLING=true; shift ;;
+        --skip-openmeter-platform) SKIP_OPENMETER_PLATFORM=true; shift ;;
         --external-model-provider) EXTERNAL_MODEL_PROVIDER="$2"; shift 2 ;;
         --external-model-api-key) EXTERNAL_MODEL_API_KEY="$2"; shift 2 ;;
         --dry-run) DRY_RUN=true; shift ;;
@@ -102,7 +120,7 @@ idempotent  - re-running skips what's already done.
 
 Options:
   --model <name>       Model: simulator, granite-tiny-gpu, gpt-oss-20b, auto (default: auto)
-  --from-phase <N>     Start from phase N (0-10, default: 0)
+  --from-phase <N>     Start from phase N (0-12, default: 0)
   --skip-models        Skip Phase 5 (model deployment)
   --skip-verify        Skip Phase 6 (verification)
   --with-observability Also run Phase 7 (Tempo + OpenTelemetry + COO + Gateway telemetry)
@@ -110,6 +128,10 @@ Options:
   --with-litemaas      Also run Phase 9 (LiteMaaS + LiteLLM PoC GUI)
   --with-compact-maas  Also run Phase 10 (Compact MaaS — native UX, no LiteLLM)
   --with-maas-console  Deprecated alias for --with-compact-maas
+  --with-lago-billing  Also run Phase 11 (Lago billing scaffold + auto Phase 7 if needed)
+  --skip-lago-platform Skip Lago Helm install (external Lago; maas-billing base still applied)
+  --with-openmeter-billing Also run Phase 12 (OpenMeter billing scaffold + auto Phase 7 if needed)
+  --skip-openmeter-platform Skip OpenMeter Helm install (external; maas-billing base still applied)
   --external-model-provider <p>   Provider: openai (default), gemini, bedrock (or set EXTERNAL_MODEL_PROVIDER)
   --external-model-api-key <key>  API key for external provider (or set EXTERNAL_MODEL_API_KEY)
   --dry-run            Preview without applying
@@ -133,6 +155,10 @@ Phases:
   8  External models    ExternalModel + governance (only with --with-external-models)
   9  LiteMaaS           LiteMaaS + LiteLLM GUI PoC (only with --with-litemaas)
  10  Compact MaaS       Thin native MaaS UI/BFF (only with --with-compact-maas)
+ 11  Lago billing       Lago platform + maas-billing RBAC/templates (only with --with-lago-billing)
+ 12  OpenMeter billing  OpenMeter platform + maas-billing (only with --with-openmeter-billing)
+
+Pick ONE billing backend per cluster (Lago or OpenMeter, not both).
 
 Auto-detection (--model auto):
   No GPU             -> simulator (CPU-only, ~30s startup)
@@ -358,6 +384,7 @@ HAS_MAAS_API=false
 HAS_TENANT=false
 HAS_MODELS=false
 HAS_METALLB=false
+HAS_GATEWAY_TELEMETRY=false
 
 # Detect cloud vs non-cloud platform (affects Gateway LB provisioning)
 PLATFORM_TYPE=$(oc get infrastructure cluster -o jsonpath='{.status.platformStatus.type}' 2>/dev/null || echo "Unknown")
@@ -393,6 +420,7 @@ MODEL_COUNT=$(oc get llminferenceservice -A --no-headers 2>/dev/null | wc -l | t
 [ "$MODEL_COUNT" -gt 0 ] 2>/dev/null && HAS_MODELS=true
 METALLB_CSVS=$(oc get csv -n metallb-system --no-headers 2>/dev/null || true)
 echo "$METALLB_CSVS" | grep "metallb-operator" >/dev/null 2>&1 && HAS_METALLB=true
+if maas_gateway_telemetry_ready; then HAS_GATEWAY_TELEMETRY=true; else HAS_GATEWAY_TELEMETRY=false; fi
 
 echo ""
 log_info "Detected state:"
@@ -410,6 +438,7 @@ log_info "  maas-api:           $([ "$HAS_MAAS_API" = true ] && echo "running" |
 log_info "  Tenant CR:          $([ "$HAS_TENANT" = true ] && echo "ready" || echo "not found")"
 log_info "  MetalLB operator:   $([ "$HAS_METALLB" = true ] && echo "installed" || echo "not found")"
 log_info "  Models deployed:    $([ "$HAS_MODELS" = true ] && echo "yes" || echo "no")"
+log_info "  Gateway telemetry:  $([ "$HAS_GATEWAY_TELEMETRY" = true ] && echo "ready (Phase 7)" || echo "not installed")"
 
 # Determine which phases will run
 PHASES_TO_RUN=""
@@ -423,6 +452,21 @@ should_run 7 && [ "$WITH_OBSERVABILITY" = true ] && PHASES_TO_RUN="$PHASES_TO_RU
 should_run 8 && [ "$WITH_EXTERNAL_MODELS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 8"
 should_run 9 && [ "$WITH_LITEMAAS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 9"
 should_run 10 && [ "$WITH_COMPACT_MAAS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 10"
+should_run 11 && [ "$WITH_LAGO_BILLING" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 11"
+should_run 12 && [ "$WITH_OPENMETER_BILLING" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 12"
+
+if [ "$WITH_LAGO_BILLING" = true ] && [ "$WITH_OPENMETER_BILLING" = true ]; then
+    log_error "Choose one billing backend: --with-lago-billing OR --with-openmeter-billing (not both)"
+    exit 1
+fi
+
+# Billing usage-reporter needs gateway telemetry labels — ensure Phase 7 runs when billing is requested.
+if { [ "$WITH_LAGO_BILLING" = true ] || [ "$WITH_OPENMETER_BILLING" = true ]; } && [ "$HAS_GATEWAY_TELEMETRY" = false ]; then
+    if [ "$WITH_OBSERVABILITY" = false ]; then
+        log_info "Phase 11 requires gateway telemetry — will install Phase 7 observability first"
+    fi
+    WITH_OBSERVABILITY=true
+fi
 echo ""
 log_info "Phases to run:${PHASES_TO_RUN:- (none)}"
 
@@ -1442,14 +1486,189 @@ if should_run 10 && [ "$WITH_COMPACT_MAAS" = true ]; then
         log_step "Deploying Compact MaaS (builds + Helm)..."
         (
             cd "$COMPACT_MAAS_DIR"
+            export CLUSTER_DOMAIN
             export MAAS_GATEWAY_URL="$MAAS_GW_URL"
-            ./scripts/deploy.sh
+            if [ "${COMPACT_MAAS_SKIP_BUILD:-false}" = true ]; then
+                export SKIP_BUILDS=1
+                ./scripts/deploy.sh --helm-only
+            else
+                ./scripts/deploy.sh
+            fi
         )
 
+        if [ -x "$SCRIPT_DIR/fix-compact-maas-config.sh" ] || [ -f "$SCRIPT_DIR/fix-compact-maas-config.sh" ]; then
+            if ! COMPACT_MAAS_DIR="$COMPACT_MAAS_DIR" "$SCRIPT_DIR/fix-compact-maas-config.sh" 2>/dev/null; then
+                log_step "Re-applying OAuth / gateway / enrollment URLs..."
+                COMPACT_MAAS_DIR="$COMPACT_MAAS_DIR" "$SCRIPT_DIR/fix-compact-maas-config.sh" --apply-fix \
+                    || log_warn "Compact MaaS config repair failed — login may redirect to wrong oauth-openshift host"
+            fi
+        fi
+
+        if [ -x "$SCRIPT_DIR/fix-compact-maas-native-maas.sh" ] || [ -f "$SCRIPT_DIR/fix-compact-maas-native-maas.sh" ]; then
+            if ! COMPACT_MAAS_DIR="$COMPACT_MAAS_DIR" "$SCRIPT_DIR/fix-compact-maas-native-maas.sh" 2>/dev/null; then
+                log_step "Re-applying BBR anchor with maas-api bypass..."
+                COMPACT_MAAS_DIR="$COMPACT_MAAS_DIR" "$SCRIPT_DIR/fix-compact-maas-native-maas.sh" --apply-fix \
+                    || log_warn "BBR anchor repair failed — ExternalModel chat or key mint may be broken"
+            fi
+        fi
+
         if [ -x "$SCRIPT_DIR/verify-guis.sh" ] || [ -f "$SCRIPT_DIR/verify-guis.sh" ]; then
-            "$SCRIPT_DIR/verify-guis.sh" --compact-maas || log_warn "Compact MaaS soft verify had warnings"
+            "$SCRIPT_DIR/verify-guis.sh" --compact-maas || log_warn "Compact MaaS verify failed (see fix-compact-maas-native-maas.sh)"
         fi
     fi
+fi
+
+# =============================================================================
+# Phase 11: Lago billing (Optional)
+# =============================================================================
+if should_run 11 && [ "$WITH_LAGO_BILLING" = true ]; then
+    log_phase 11 "Lago billing (budget entities + graduated throttling)"
+
+    if [ "$DRY_RUN" = false ]; then
+        maas_billing_require_backend lago || exit 1
+    else
+        detected="$(maas_billing_backend_detected)"
+        if [[ "$detected" == "openmeter" || "$detected" == "conflict" ]]; then
+            log_warn "[DRY RUN] Would abort: OpenMeter billing already installed (detected: ${detected})"
+        fi
+    fi
+
+    if ! maas_gateway_telemetry_ready; then
+        log_step "Gateway telemetry not found — installing Phase 7 observability (required for usage-reporter)..."
+        if [ "$DRY_RUN" = true ]; then
+            log_info "[DRY RUN] Would run: $SCRIPT_DIR/setup-maas.sh --from-phase 7 --with-observability --skip-models --skip-verify"
+        else
+            "$SCRIPT_DIR/setup-maas.sh" --from-phase 7 --with-observability --skip-models --skip-verify || {
+                log_error "Phase 7 observability install failed — cannot continue Phase 11"
+                exit 1
+            }
+        fi
+    else
+        log_info "Gateway telemetry (TelemetryPolicy/maas-telemetry) already present"
+    fi
+
+    if [ "$SKIP_LAGO_PLATFORM" = true ]; then
+        log_info "Skipping Lago Helm install (--skip-lago-platform)"
+    elif [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would run: $SCRIPT_DIR/install-lago-platform.sh"
+    else
+        log_step "Installing Lago platform (Helm)..."
+        CLUSTER_DOMAIN="$CLUSTER_DOMAIN" "$SCRIPT_DIR/install-lago-platform.sh" || \
+            log_warn "Lago Helm install had warnings — maas-billing base will still be applied"
+    fi
+
+    log_step "Applying MaaS billing base (namespace, tier templates, RBAC)..."
+    run_cmd oc apply -k "$MANIFESTS_DIR/11-lago/base/"
+
+    if [ -f "$MANIFESTS_DIR/11-lago/maas-billing-api/kustomization.yaml" ]; then
+        log_step "Applying maas-billing-api manifests..."
+        run_cmd oc apply -k "$MANIFESTS_DIR/11-lago/maas-billing-api/"
+        if [ "$DRY_RUN" = false ] && [ -x "$SCRIPT_DIR/build-maas-billing-image.sh" ]; then
+            log_step "Building maas-billing container image (OpenShift binary build)..."
+            "$SCRIPT_DIR/build-maas-billing-image.sh" || log_warn "maas-billing image build failed — retry: ./scripts/build-maas-billing-image.sh"
+        fi
+        if [ "$DRY_RUN" = false ] && [ -x "$SCRIPT_DIR/install-lago-catalog.sh" ] && [ "$SKIP_LAGO_PLATFORM" != true ]; then
+            if ! oc get secret maas-billing-secrets -n maas-billing &>/dev/null; then
+                log_warn "Secret maas-billing-secrets missing — create after Lago UI API key:"
+                log_warn "  oc create secret generic maas-billing-secrets -n maas-billing --from-literal=LAGO_API_KEY=<key>"
+            else
+                log_step "Bootstrapping Lago billable metric + plan..."
+                "$SCRIPT_DIR/install-lago-catalog.sh" || log_warn "Lago catalog bootstrap had warnings — see docs/11-lago-billing.md"
+            fi
+        fi
+    fi
+
+    for component in usage-reporter budget-enforcer enrollment-ui; do
+        if [ -f "$MANIFESTS_DIR/11-lago/${component}/kustomization.yaml" ]; then
+            log_step "Applying ${component}..."
+            run_cmd oc apply -k "$MANIFESTS_DIR/11-lago/${component}/"
+        fi
+    done
+
+    if [ -x "$SCRIPT_DIR/verify-lago.sh" ] || [ -f "$SCRIPT_DIR/verify-lago.sh" ]; then
+        if [ "$DRY_RUN" = false ]; then
+            "$SCRIPT_DIR/verify-lago.sh" || log_warn "Lago billing soft verify had warnings"
+        fi
+    fi
+
+    log_info "Phase 11 applied. Set LAGO_API_KEY in maas-billing-secrets, enroll entities via maas-billing-api (see docs/11-lago-billing.md)"
+fi
+
+# =============================================================================
+# Phase 12: OpenMeter billing (Optional)
+# =============================================================================
+if should_run 12 && [ "$WITH_OPENMETER_BILLING" = true ]; then
+    log_phase 12 "OpenMeter billing (budget entities + graduated throttling)"
+
+    if [ "$DRY_RUN" = false ]; then
+        maas_billing_require_backend openmeter || exit 1
+    else
+        detected="$(maas_billing_backend_detected)"
+        if [[ "$detected" == "lago" || "$detected" == "conflict" ]]; then
+            log_warn "[DRY RUN] Would abort: Lago billing already installed (detected: ${detected})"
+        fi
+    fi
+
+    if ! maas_gateway_telemetry_ready; then
+        log_step "Gateway telemetry not found — installing Phase 7 observability (required for usage-reporter)..."
+        if [ "$DRY_RUN" = true ]; then
+            log_info "[DRY RUN] Would run: $SCRIPT_DIR/setup-maas.sh --from-phase 7 --with-observability --skip-models --skip-verify"
+        else
+            "$SCRIPT_DIR/setup-maas.sh" --from-phase 7 --with-observability --skip-models --skip-verify || {
+                log_error "Phase 7 observability install failed — cannot continue Phase 12"
+                exit 1
+            }
+        fi
+    else
+        log_info "Gateway telemetry (TelemetryPolicy/maas-telemetry) already present"
+    fi
+
+    if [ "$SKIP_OPENMETER_PLATFORM" = true ]; then
+        log_info "Skipping OpenMeter Helm install (--skip-openmeter-platform)"
+    elif [ "$DRY_RUN" = true ]; then
+        log_info "[DRY RUN] Would run: $SCRIPT_DIR/install-openmeter-platform.sh"
+    else
+        log_step "Installing OpenMeter platform (Helm)..."
+        CLUSTER_DOMAIN="$CLUSTER_DOMAIN" "$SCRIPT_DIR/install-openmeter-platform.sh" || \
+            log_warn "OpenMeter Helm install had warnings — maas-billing base will still be applied"
+    fi
+
+    log_step "Applying MaaS billing base (namespace, tier templates, RBAC)..."
+    run_cmd oc apply -k "$MANIFESTS_DIR/12-openmeter/base/"
+
+    if [ -f "$MANIFESTS_DIR/12-openmeter/maas-billing-api/kustomization.yaml" ]; then
+        log_step "Applying maas-billing-api manifests..."
+        run_cmd oc apply -k "$MANIFESTS_DIR/12-openmeter/maas-billing-api/"
+        if [ "$DRY_RUN" = false ] && [ -x "$SCRIPT_DIR/build-maas-billing-image.sh" ]; then
+            log_step "Building maas-billing container image (shared with Phase 11)..."
+            MAAS_BILLING_SRC="${MAAS_BILLING_SRC:-$MANIFESTS_DIR/11-lago/maas-billing}" \
+                "$SCRIPT_DIR/build-maas-billing-image.sh" || \
+                log_warn "maas-billing image build failed — retry: ./scripts/build-maas-billing-image.sh"
+        fi
+        if [ "$DRY_RUN" = false ] && [ -x "$SCRIPT_DIR/install-openmeter-catalog.sh" ] && [ "$SKIP_OPENMETER_PLATFORM" != true ]; then
+            log_step "Bootstrapping OpenMeter meter + feature..."
+            "$SCRIPT_DIR/install-openmeter-catalog.sh" || log_warn "OpenMeter catalog bootstrap had warnings — see docs/12-openmeter-billing.md"
+            if [ -x "$SCRIPT_DIR/install-openmeter-demo-entity.sh" ]; then
+                log_step "Ensuring demo budget entity (admin)..."
+                "$SCRIPT_DIR/install-openmeter-demo-entity.sh" || log_warn "Demo entity enrollment had warnings"
+            fi
+        fi
+    fi
+
+    for component in usage-reporter budget-enforcer enrollment-ui; do
+        if [ -f "$MANIFESTS_DIR/12-openmeter/${component}/kustomization.yaml" ]; then
+            log_step "Applying ${component}..."
+            run_cmd oc apply -k "$MANIFESTS_DIR/12-openmeter/${component}/"
+        fi
+    done
+
+    if [ -x "$SCRIPT_DIR/verify-openmeter.sh" ] || [ -f "$SCRIPT_DIR/verify-openmeter.sh" ]; then
+        if [ "$DRY_RUN" = false ]; then
+            "$SCRIPT_DIR/verify-openmeter.sh" || log_warn "OpenMeter billing soft verify had warnings"
+        fi
+    fi
+
+    log_info "Phase 12 applied. Enroll entities via maas-billing-api (see docs/12-openmeter-billing.md)"
 fi
 
 # =============================================================================
@@ -1500,6 +1719,17 @@ else
         COMPACT_HOST=$(oc -n compact-maas get route compact-maas -o jsonpath='{.spec.host}' 2>/dev/null || true)
         [ -n "$COMPACT_HOST" ] && log_info "Compact MaaS:  https://${COMPACT_HOST}"
     fi
+    if [ "$WITH_OPENMETER_BILLING" = true ] || { oc get configmap maas-billing-config -n maas-billing -o jsonpath='{.data.BILLING_BACKEND}' 2>/dev/null | grep -q openmeter; }; then
+        OM_HOST=$(oc -n openmeter get route openmeter -o jsonpath='{.spec.host}' 2>/dev/null || true)
+        [ -n "$OM_HOST" ] && log_info "OpenMeter API: https://${OM_HOST}"
+        BILLING_HOST=$(oc -n maas-billing get route maas-billing-api -o jsonpath='{.spec.host}' 2>/dev/null || true)
+        [ -n "$BILLING_HOST" ] && log_info "Billing API:   https://${BILLING_HOST}"
+    elif [ "$WITH_LAGO_BILLING" = true ] || oc get ns maas-billing &>/dev/null; then
+        LAGO_HOST=$(oc -n lago get route lago-front -o jsonpath='{.spec.host}' 2>/dev/null || true)
+        [ -n "$LAGO_HOST" ] && log_info "Lago UI:       https://${LAGO_HOST}"
+        LAGO_API=$(oc -n lago get route lago-api -o jsonpath='{.spec.host}' 2>/dev/null || true)
+        [ -n "$LAGO_API" ] && log_info "Lago API:      https://${LAGO_API}"
+    fi
 
     echo ""
     log_info "Next steps:"
@@ -1509,6 +1739,8 @@ else
     [ "$WITH_EXTERNAL_MODELS" = false ] && log_info "  Add external models: $0 --from-phase 8 --with-external-models --external-model-provider openai --external-model-api-key <KEY>"
     [ "$WITH_LITEMAAS" = false ] && log_info "  Add LiteMaaS GUI:    $0 --from-phase 9 --with-litemaas"
     [ "$WITH_COMPACT_MAAS" = false ] && log_info "  Add Compact MaaS:    $0 --from-phase 10 --with-compact-maas"
+    [ "$WITH_LAGO_BILLING" = false ] && [ "$WITH_OPENMETER_BILLING" = false ] && log_info "  Add Lago billing:       $0 --from-phase 11 --with-lago-billing"
+    [ "$WITH_OPENMETER_BILLING" = false ] && log_info "  Add OpenMeter billing:  $0 --from-phase 12 --with-openmeter-billing"
     log_info "  RHOAI Dashboard:    https://$(oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null || echo '<dashboard-route>')"
 fi
 

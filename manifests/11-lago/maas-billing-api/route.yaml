@@ -1,0 +1,16 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: maas-billing-api
+  namespace: maas-billing
+  labels:
+    app.kubernetes.io/name: maas-billing-api
+    app.kubernetes.io/part-of: maas-billing
+spec:
+  to:
+    kind: Service
+    name: maas-billing-api
+  port:
+    targetPort: http
+  tls:
+    termination: edge

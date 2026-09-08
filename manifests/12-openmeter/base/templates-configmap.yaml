@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-billing-tier-templates
+  namespace: maas-billing
+  labels:
+    app.kubernetes.io/part-of: maas-billing
+    app.kubernetes.io/component: budget-enforcer
+    maas-billing/backend: openmeter
+data:
+  standard.full.yaml: |
+    modelRefs:
+      - name: gemma-4-e4b-it
+        namespace: llm
+        tokenRateLimits:
+          - limit: 100000
+            window: 1m
+  standard.throttled.yaml: |
+    modelRefs:
+      - name: gemma-4-e4b-it
+        namespace: llm
+        tokenRateLimits:
+          - limit: 500
+            window: 1m
+  standard.free_only.yaml: |
+    modelRefs:
+      - name: gemma-4-e4b-it
+        namespace: llm
+        tokenRateLimits:
+          - limit: 100
+            window: 1m
+  standard.exhausted.yaml: |
+    modelRefs: []

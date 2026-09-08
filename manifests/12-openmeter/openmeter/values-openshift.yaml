@@ -1,0 +1,53 @@
+# OpenShift-friendly OpenMeter Helm values for rhoai-maas-guide Phase 12.
+# Installed by scripts/install-openmeter-platform.sh (OCI chart on GHCR).
+#
+# OpenShift post-Helm fixes (required after every helm upgrade):
+#   - Chart merge drops ?sslmode=disable on postgres url → scripts/lib/openmeter-openshift.sh
+#   - Chart binds API on port 80 → patched to 8080 (non-root pods)
+# Re-apply: ./scripts/fix-openmeter-openshift.sh
+
+ingress:
+  enabled: false
+
+# Embedded Postgres does not enable TLS; OpenMeter defaults to SSL and crashes without this.
+config:
+  postgres:
+    url: postgres://application:application@openmeter-postgres:5432/application?sslmode=disable
+    autoMigrate: migration
+
+kafka:
+  enabled: true
+
+clickhouse:
+  enabled: true
+  operator:
+    install: true
+
+redis:
+  enabled: true
+  auth:
+    enabled: false
+
+postgresql:
+  enabled: true
+  # Bitnami free images moved to bitnamilegacy (chart defaults may still pin bitnami/*).
+  image:
+    repository: bitnamilegacy/postgresql
+  volumePermissions:
+    image:
+      repository: bitnamilegacy/os-shell
+  metrics:
+    image:
+      repository: bitnamilegacy/postgres-exporter
+
+svix:
+  enabled: true
+
+api:
+  replicaCount: 1
+
+sinkWorker:
+  replicaCount: 1
+
+balanceWorker:
+  replicaCount: 1

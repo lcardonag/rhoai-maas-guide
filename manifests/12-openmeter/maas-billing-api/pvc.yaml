@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maas-billing-api-data
+  namespace: maas-billing
+  labels:
+    app.kubernetes.io/name: maas-billing-api
+    app.kubernetes.io/part-of: maas-billing
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

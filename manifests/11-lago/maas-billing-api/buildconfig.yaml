@@ -1,0 +1,19 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: maas-billing
+  namespace: maas-billing
+  labels:
+    app.kubernetes.io/part-of: maas-billing
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: maas-billing:latest
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  triggers: []

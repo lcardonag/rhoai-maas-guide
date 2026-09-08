@@ -1,0 +1,27 @@
+# Cluster-wide MCP server catalog for Gen AI Studio Playground.
+# Apply once (cluster-admin). Users enable servers per session in Playground → MCP tab.
+#
+#   oc apply -f manifests/13-gen-ai-studio/gen-ai-aa-mcp-servers.yaml
+#
+# Docs: docs/gen-ai-studio.md#mcp-servers
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gen-ai-aa-mcp-servers
+  namespace: redhat-ods-applications
+data:
+  Fetch: |
+    {
+      "url": "https://remote.mcpservers.org/fetch",
+      "description": "Fetch web pages and convert HTML to markdown. Public demo server."
+    }
+  Sequential-Thinking: |
+    {
+      "url": "https://remote.mcpservers.org/sequentialthinking",
+      "description": "Structured step-by-step reasoning helper (demo server)."
+    }
+  GitHub-MCP-Server: |
+    {
+      "url": "https://api.githubcopilot.com/mcp/x/repos/readonly",
+      "description": "Read-only GitHub repository access. Requires a GitHub token at authorize time in the Playground MCP tab."
+    }

@@ -1,7 +1,7 @@
 ---
 name: install-maas
 description: Install MaaS (Models as a Service) on a connected RHOAI cluster using this guide's Kustomize manifests and automation scripts.
-argument-hint: "[--model simulator|granite-tiny-gpu|gpt-oss-20b|auto] [--from-phase N] [--skip-models] [--skip-verify] [--with-observability] [--with-compact-maas] [--with-litemaas]"
+argument-hint: "[--model simulator|granite-tiny-gpu|gpt-oss-20b|auto] [--from-phase N] [--skip-models] [--skip-verify] [--with-observability] [--with-compact-maas] [--with-litemaas] [--with-lago-billing]"
 allowed-tools: Bash(oc *), Bash(./*), Bash(envsubst *), Bash(curl *), Bash(jq *), Bash(grep *), Bash(ls *), Bash(cat *), Bash(date *), Bash(mkdir *), Bash(echo *), Bash(bash *), AskUserQuestion
 ---
 
@@ -26,6 +26,8 @@ Install Models as a Service on OpenShift with RHOAI using `./scripts/setup-maas.
 - `--with-observability` — Phase 7
 - `--with-compact-maas` — Phase 10
 - `--with-litemaas` — Phase 9
+- `--with-lago-billing` — Phase 11 (auto Phase 7 gateway telemetry if missing)
+- `--skip-lago-platform` — Phase 11 without Lago Helm (external Lago)
 - `--dry-run` — Preview only
 
 ## Phases
@@ -41,6 +43,7 @@ Install Models as a Service on OpenShift with RHOAI using `./scripts/setup-maas.
 | 6 | `verify.sh` E2E |
 | 7 | Observability (optional) |
 | 9–10 | LiteMaaS / Compact MaaS GUIs (optional) |
+| 11 | Lago billing scaffold (optional; auto Phase 7) |
 
 ## Common patterns
 
@@ -53,7 +56,16 @@ Install Models as a Service on OpenShift with RHOAI using `./scripts/setup-maas.
 
 # Resume
 ./scripts/setup-maas.sh --from-phase 4
+
+# Compact MaaS only (after phases 1–4 + model registered)
+# Clone ../rhoai-maas-console or ../compact-maas next to this guide first
+./scripts/setup-maas.sh --from-phase 10 --with-compact-maas
+./scripts/verify-guis.sh --compact-maas   # fails if native key mint broken
 ```
+
+**Compact MaaS sibling repo:** `../compact-maas` or `../rhoai-maas-console` (set `COMPACT_MAAS_DIR` if elsewhere). Phase 10 runs OpenShift builds — allow **10–25 min**.
+
+**Lago billing:** `./scripts/setup-maas.sh --from-phase 11 --with-lago-billing` — installs Phase 7 gateway telemetry if missing, then Lago Helm + `maas-billing` base.
 
 ## Inference test (after model registered)
 

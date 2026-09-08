@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: maas-billing
+  labels:
+    app.kubernetes.io/part-of: maas-billing
+    app.kubernetes.io/managed-by: rhoai-maas-guide

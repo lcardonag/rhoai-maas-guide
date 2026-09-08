@@ -34,7 +34,7 @@ Test with a MaaS `*-free` subscription key (not the IBM key), prefer `--http1.1`
 ```bash
 NS=llm   # or external-models (must match ModelRef + gateway-access label)
 oc apply -f namespace.yaml   # if using external-models
-# create secret …-credentials with api-key + bbr-managed + ipp-managed labels
+# create secret …-credentials with api-key + bbr-managed + ipp-managed + inference.llm-d.ai/ipp-managed labels
 sed -e 's/REPLACE-PROJECT-UUID/…/' -e 's/REPLACE-TARGET-MODEL-ID/…/' \
     -e 's/REPLACE-FQDN/us-east.rhai.ibm.com/' \
   external-model.yaml | oc apply -f -

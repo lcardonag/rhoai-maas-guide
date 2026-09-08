@@ -6,21 +6,27 @@
 # Discovers models via `GET {endpoint}{path-prefix}/v1/models` (Bearer auth)
 # and, for each selected id, creates the same resources Compact MaaS Admin's
 # "Create ExternalModel" form would:
-#   1. A shared credential Secret (labels: bbr-managed + ipp-managed)
+#   1. A shared credential Secret (labels: bbr-managed + ipp-managed + inference.llm-d.ai/ipp-managed)
 #   2. ExternalModel                (spec.provider / targetModel / endpoint)
 #   3. MaaSModelRef                 (catalog entry)
 #   4. MaaSAuthPolicy + MaaSSubscription (open system:authenticated tier,
 #      unless --skip-governance or --restricted)
-#   5. HTTPRoute URLRewrite heal    (/<namespace>/<name> -> path-prefix or /)
+#   5. Validation (default): upstream chat probe, BBR credential reload,
+#      gateway E2E on first model — mirrors Compact MaaS "Test connection"
+#   6. HTTPRoute URLRewrite heal    (/<namespace>/<name> -> path-prefix or /)
 #
 # Idempotent: every mutation is `oc apply` (or an idempotent PATCH for the
 # HTTPRoute), so re-running is safe.
 #
 # Usage:
-#   ./scripts/import-external-models.sh --endpoint api.openai.com \
+#   ./scripts/import-external-models.sh --preset openai \
 #       --api-key "$OPENAI_API_KEY" --all
 #
-#   ./scripts/import-external-models.sh --endpoint us-east.rhai.ibm.com \
+#   ./scripts/import-external-models.sh --preset openrouter \
+#       --api-key "$OPENROUTER_API_KEY" --all
+#
+#   ./scripts/import-external-models.sh --preset ibm-rhai \
+#       --endpoint us-east.rhai.ibm.com \
 #       --path-prefix /v1/projects/<uuid>/inference \
 #       --api-key "$RHAI_API_KEY" --namespace llm \
 #       --models granite-4-0-h-small,granite-4-0-h-tiny
@@ -67,6 +73,7 @@ trap on_interrupt INT TERM
 # -----------------------------------------------------------------------------
 ENDPOINT_RAW=""
 API_KEY="${EXTERNAL_MODEL_API_KEY:-}"
+PRESET=""
 PATH_PREFIX=""
 NAMESPACE="external-models"
 GOVERNANCE_NAMESPACE="models-as-a-service"
@@ -84,10 +91,40 @@ TOKEN_WINDOW="1h"
 SKIP_NAMESPACE=false
 SKIP_ROUTE_HEAL=false
 WAIT_READY=true
+SKIP_VALIDATE=false
+VALIDATE_ALL=false
+SKIP_BBR_RELOAD=false
 INSECURE=false
 DRY_RUN=false
+VALIDATION_FAILURES=()
 
 KNOWN_PROVIDERS="openai anthropic azure-openai vertex bedrock-openai"
+KNOWN_PRESETS="openai openrouter ibm-rhai"
+
+apply_preset() {
+    case "$PRESET" in
+        "" ) return 0 ;;
+        openai)
+            [ -z "$ENDPOINT_RAW" ] && ENDPOINT_RAW="api.openai.com"
+            PROVIDER="openai"
+            [ -z "$API_KEY" ] && API_KEY="${OPENAI_API_KEY:-}"
+            ;;
+        openrouter)
+            [ -z "$ENDPOINT_RAW" ] && ENDPOINT_RAW="openrouter.ai"
+            [ -z "$PATH_PREFIX" ] && PATH_PREFIX="/api"
+            PROVIDER="openai"
+            [ -z "$API_KEY" ] && API_KEY="${OPENROUTER_API_KEY:-}"
+            ;;
+        ibm-rhai|ibm)
+            PROVIDER="openai"
+            [ -z "$API_KEY" ] && API_KEY="${RHAI_API_KEY:-${IBM_RHAI_API_KEY:-}}"
+            ;;
+        *)
+            log_error "Unknown --preset '${PRESET}' (supported: ${KNOWN_PRESETS})"
+            exit 1
+            ;;
+    esac
+}
 
 usage() {
     cat <<'EOF'
@@ -98,7 +135,7 @@ and register them on the cluster as MaaS ExternalModel + MaaSModelRef (+
 optional governance), matching what Compact MaaS Admin's ExternalModel
 "Create" form provisions. No GUI required.
 
-Required:
+Required (one of):
   --endpoint <fqdn-or-url>   Provider host, e.g. api.openai.com, or a full URL
                              (e.g. https://us-east.rhai.ibm.com/v1/projects/<uuid>/inference).
                              A path embedded in the URL is used as --path-prefix
@@ -106,8 +143,18 @@ Required:
                              IMPORTANT: if the base URL already ends in /v1, pass the
                              host only (no /v1) — the script always appends /v1/models
                              itself, so host+/v1 would query .../v1/v1/models.
+                             Not required when --preset is openai or openrouter (defaults apply).
   --api-key <key>            Provider (or remote MaaS gateway) API key
-                             (or set EXTERNAL_MODEL_API_KEY)
+                             (or set EXTERNAL_MODEL_API_KEY; presets also accept
+                             OPENAI_API_KEY, OPENROUTER_API_KEY, RHAI_API_KEY)
+
+Provider presets (optional shortcuts):
+  --preset <name>            Apply known endpoint/path defaults before other flags:
+                               openai      -> api.openai.com (root /v1; provider openai)
+                               openrouter  -> openrouter.ai + path /api (provider openai)
+                               ibm-rhai    -> provider openai; still requires --endpoint
+                                              and --path-prefix /v1/projects/<uuid>/inference
+                             Explicit --endpoint / --path-prefix / --provider override preset defaults.
 
 Discovery / selection:
   --path-prefix <path>       Upstream base path (e.g. /v1/projects/<uuid>/inference).
@@ -136,6 +183,15 @@ Cluster resources:
   --skip-namespace           Do not create/check the target namespace.
   --skip-route-heal          Do not patch the HTTPRoute URLRewrite filter.
   --no-wait                  Do not wait for MaaSModelRef to reach phase=Ready.
+
+Validation (mirrors Compact MaaS Admin "Test connection" + gateway E2E):
+  By default, after registering models the script (1) probes upstream chat for the
+  first selected model id, (2) restarts payload-processing so BBR loads the new
+  credential Secret, and (3) mints an ephemeral MaaS key to call the first model
+  through the gateway. Skipped when --skip-governance (no subscription to mint against).
+  --skip-validate            Register only — no upstream chat probe, BBR reload, or gateway test.
+  --validate-all             Gateway-test every registered model (slow for large --all runs).
+  --skip-bbr-reload          Do not restart payload-processing after applying the Secret.
 
 Note on HTTPRoute healing: the MaaS controller creates each model's HTTPRoute
 asynchronously, so healing polls for up to ~90s. If it never appears/settles in
@@ -168,30 +224,34 @@ General:
   -h, --help                  Show this help message.
 
 Examples:
-  # Stock OpenAI, register every model, default governance
-  ./scripts/import-external-models.sh --endpoint api.openai.com \
+  # Stock OpenAI (preset or explicit endpoint)
+  ./scripts/import-external-models.sh --preset openai \
       --api-key "$OPENAI_API_KEY" --all
 
+  # OpenRouter (OpenAI-compatible; upstream base is /api/v1/...)
+  ./scripts/import-external-models.sh --preset openrouter \
+      --api-key "$OPENROUTER_API_KEY" --list
+
   # IBM RHAI / project-prefixed host, pick specific models, Compact MaaS namespace
-  ./scripts/import-external-models.sh \
+  ./scripts/import-external-models.sh --preset ibm-rhai \
       --endpoint us-east.rhai.ibm.com \
       --path-prefix /v1/projects/002d4a39-9d40-4c25-a9fa-a603eebdb574/inference \
       --api-key "$RHAI_API_KEY" --namespace llm \
       --models granite-4-0-h-small,granite-4-0-h-tiny
 
   # Just see what's there, no changes
-  ./scripts/import-external-models.sh --endpoint api.openai.com \
-      --api-key "$OPENAI_API_KEY" --list
+  ./scripts/import-external-models.sh --preset openai --api-key "$OPENAI_API_KEY" --list
 
   # Preview everything (manifests only) without touching the cluster
-  ./scripts/import-external-models.sh --endpoint api.openai.com \
-      --api-key "$OPENAI_API_KEY" --all --dry-run
+  ./scripts/import-external-models.sh --preset openrouter \
+      --api-key "$OPENROUTER_API_KEY" --all --dry-run
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --endpoint)             ENDPOINT_RAW="$2"; shift 2 ;;
+        --preset)               PRESET="$2"; shift 2 ;;
         --api-key)              API_KEY="$2"; shift 2 ;;
         --path-prefix)          PATH_PREFIX="$2"; shift 2 ;;
         --namespace)            NAMESPACE="$2"; shift 2 ;;
@@ -210,6 +270,9 @@ while [[ $# -gt 0 ]]; do
         --skip-namespace)       SKIP_NAMESPACE=true; shift ;;
         --skip-route-heal)      SKIP_ROUTE_HEAL=true; shift ;;
         --no-wait)              WAIT_READY=false; shift ;;
+        --skip-validate)        SKIP_VALIDATE=true; shift ;;
+        --validate-all)         VALIDATE_ALL=true; shift ;;
+        --skip-bbr-reload)      SKIP_BBR_RELOAD=true; shift ;;
         -k|--insecure)          INSECURE=true; shift ;;
         --dry-run)               DRY_RUN=true; shift ;;
         -h|--help)               usage; exit 0 ;;
@@ -315,13 +378,15 @@ unique_name() {
 # -----------------------------------------------------------------------------
 # Preflight
 # -----------------------------------------------------------------------------
+apply_preset
+
 if [ -z "$ENDPOINT_RAW" ]; then
-    log_error "--endpoint is required"
+    log_error "--endpoint is required (or use --preset openai / --preset openrouter)"
     usage
     exit 1
 fi
 if [ -z "$API_KEY" ]; then
-    log_error "--api-key is required (or set EXTERNAL_MODEL_API_KEY)"
+    log_error "--api-key is required (or set EXTERNAL_MODEL_API_KEY / preset env var)"
     exit 1
 fi
 
@@ -343,6 +408,13 @@ if [ -n "$EMBEDDED_PATH" ]; then
 fi
 PATH_PREFIX="$(normalize_path_prefix "$PATH_PREFIX")"
 
+if [ "$PRESET" = "ibm-rhai" ] || [ "$PRESET" = "ibm" ]; then
+    if [[ "$PATH_PREFIX" != *"/v1/projects/"* ]]; then
+        log_error "--preset ibm-rhai requires --path-prefix /v1/projects/<uuid>/inference"
+        exit 1
+    fi
+fi
+
 if [[ "$ENDPOINT" == *" "* ]] || [ -z "$ENDPOINT" ]; then
     log_error "Invalid --endpoint '${ENDPOINT_RAW}' — expected an FQDN (e.g. api.openai.com), not empty/whitespace"
     exit 1
@@ -363,6 +435,7 @@ if [ -z "$SECRET_NAME" ]; then
 fi
 
 log_head "Configuration"
+[ -n "$PRESET" ] && log_info "Preset:               ${PRESET}"
 log_info "Endpoint base:        ${BASE_URL}"
 log_info "Provider:             ${PROVIDER}"
 log_info "Namespace:            ${NAMESPACE}"
@@ -650,6 +723,7 @@ apply_secret() {
         log_info "[DRY RUN] Would create/update Secret ${SECRET_NAME} (data key: api-key) with labels:"
         log_info "[DRY RUN]   inference.networking.k8s.io/bbr-managed=true"
         log_info "[DRY RUN]   inference.networking.k8s.io/ipp-managed=true"
+        log_info "[DRY RUN]   inference.llm-d.ai/ipp-managed=true"
         return 0
     fi
     oc create secret generic "$SECRET_NAME" \
@@ -658,8 +732,113 @@ apply_secret() {
         --dry-run=client -o yaml | oc apply -f - >/dev/null
     oc label secret "$SECRET_NAME" -n "$NAMESPACE" \
         inference.networking.k8s.io/bbr-managed=true \
-        inference.networking.k8s.io/ipp-managed=true --overwrite >/dev/null
-    log_info "Secret ${SECRET_NAME} ready (bbr-managed + ipp-managed)"
+        inference.networking.k8s.io/ipp-managed=true \
+        inference.llm-d.ai/ipp-managed=true --overwrite >/dev/null
+    log_info "Secret ${SECRET_NAME} ready (bbr-managed + ipp-managed + inference.llm-d.ai/ipp-managed)"
+}
+
+get_maas_gateway_url() {
+    local domain
+    domain=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' 2>/dev/null || echo "")
+    printf 'https://maas.%s' "${domain:-<cluster-domain>}"
+}
+
+# BBR's apikey-injection plugin caches provider Secrets at startup. After bulk
+# import creates/updates the shared credential Secret, restart once so the store
+# reloads (same class of failure as Compact MaaS "Test connection" passing upstream
+# but gateway calls returning credentials not found).
+ensure_bbr_credentials_loaded() {
+    [ "$SKIP_BBR_RELOAD" = true ] && return 0
+    [ "$DRY_RUN" = true ] && return 0
+    if ! oc get deployment payload-processing -n openshift-ingress &>/dev/null; then
+        log_warn "payload-processing not found in openshift-ingress — skipping BBR credential reload"
+        return 0
+    fi
+    log_step "Reloading BBR credential store (restart payload-processing)..."
+    oc rollout restart deployment/payload-processing -n openshift-ingress >/dev/null
+    if oc rollout status deployment/payload-processing -n openshift-ingress --timeout=90s >/dev/null; then
+        log_info "payload-processing ready (upstream API keys loaded into BBR store)"
+    else
+        log_warn "payload-processing rollout did not finish within 90s — gateway validation may fail"
+    fi
+}
+
+# Compact MaaS Admin "Test connection" step 2: probe upstream chat with the provider key.
+probe_upstream_chat() {
+    local model_id="$1"
+    local url="${BASE_URL}/v1/chat/completions"
+    local curl_args=(-sS -w '\n%{http_code}' --max-time 30 \
+        -H "Authorization: Bearer ${API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"${model_id}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one word.\"}],\"max_tokens\":8}")
+    [ "$INSECURE" = true ] && curl_args+=(-k)
+
+    log_step "Upstream chat probe (Test connection): POST ${url} model=${model_id}"
+    local raw http_code body
+    if ! raw=$(curl "${curl_args[@]}" "$url" 2>&1); then
+        log_warn "Upstream chat probe failed to connect: ${raw}"
+        return 1
+    fi
+    http_code=$(printf '%s' "$raw" | tail -1)
+    body=$(printf '%s' "$raw" | sed '$d')
+    if [ "$http_code" = "200" ] && printf '%s' "$body" | grep -q '"choices"'; then
+        log_info "Upstream chat probe OK (HTTP ${http_code})"
+        return 0
+    fi
+    log_warn "Upstream chat probe failed (HTTP ${http_code}): $(printf '%s' "$body" | head -c 300)"
+    return 1
+}
+
+# Gateway E2E: mint ephemeral MaaS key → call model through maas-default-gateway.
+# Returns 0 when choices are present in the response body.
+validate_gateway_inference() {
+    local name="$1" target_model="$2"
+    local gw oc_token payload resp test_key test_key_id infer_resp http_code
+
+    gw=$(get_maas_gateway_url)
+    oc_token=$(oc whoami -t 2>/dev/null || echo "")
+    if [ -z "$oc_token" ]; then
+        log_warn "No oc token — skipping gateway validation for ${name}"
+        return 0
+    fi
+
+    log_step "Gateway inference validation for ${name}..."
+    payload=$(printf '{"name":"import-validate-%s","subscription":"%s-free","expiresIn":"1h","ephemeral":true}' \
+        "$name" "$name")
+    resp=$(curl -sk -X POST "${gw}/maas-api/v1/api-keys" \
+        -H "Authorization: Bearer ${oc_token}" \
+        -H "Content-Type: application/json" \
+        -d "$payload" 2>/dev/null || echo "")
+    test_key=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('key') or d.get('token') or '')" 2>/dev/null || echo "")
+    test_key_id=$(printf '%s' "$resp" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id') or '')" 2>/dev/null || echo "")
+
+    if [ -z "$test_key" ]; then
+        log_warn "Could not mint ephemeral API key for ${name}-free (response: $(printf '%s' "$resp" | head -c 200))"
+        return 1
+    fi
+
+    infer_resp=$(curl -sk -w '\n%{http_code}' -X POST \
+        "${gw}/${NAMESPACE}/${name}/v1/chat/completions" \
+        -H "Authorization: Bearer ${test_key}" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"${target_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one word.\"}],\"max_tokens\":8}" \
+        --max-time 45 2>/dev/null || echo "")
+
+    http_code=$(printf '%s' "$infer_resp" | tail -1)
+    infer_body=$(printf '%s' "$infer_resp" | sed '$d')
+
+    if [ -n "$test_key_id" ]; then
+        curl -sk -X DELETE "${gw}/maas-api/v1/api-keys/${test_key_id}" \
+            -H "Authorization: Bearer ${oc_token}" &>/dev/null || true
+    fi
+
+    if printf '%s' "$infer_body" | grep -q '"choices"'; then
+        log_info "Gateway validation OK for ${name}"
+        return 0
+    fi
+
+    log_warn "Gateway validation failed for ${name} (HTTP ${http_code}): $(printf '%s' "$infer_body" | head -c 300)"
+    return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -897,8 +1076,15 @@ wait_modelref_ready() {
 # Register each selected model
 # -----------------------------------------------------------------------------
 ensure_namespace
-apply_secret
 
+if [ "$SKIP_VALIDATE" = false ] && [ "${#SELECTED_IDS[@]}" -gt 0 ]; then
+    probe_upstream_chat "${SELECTED_IDS[0]}" || VALIDATION_FAILURES+=("upstream:${SELECTED_IDS[0]}")
+fi
+
+apply_secret
+ensure_bbr_credentials_loaded
+
+GATEWAY_VALIDATE_COUNT=0
 REGISTERED_NAMES=()
 for model_id in "${SELECTED_IDS[@]}"; do
     unique_name "$model_id"
@@ -917,6 +1103,17 @@ for model_id in "${SELECTED_IDS[@]}"; do
 
     if [ "$DRY_RUN" = false ] && [ "$WAIT_READY" = true ]; then
         wait_modelref_ready "$name"
+    fi
+
+    if [ "$SKIP_VALIDATE" = false ] && [ "$SKIP_GOVERNANCE" = false ] && [ "$DRY_RUN" = false ]; then
+        if [ "$VALIDATE_ALL" = true ] || [ "$GATEWAY_VALIDATE_COUNT" -eq 0 ]; then
+            if validate_gateway_inference "$name" "$model_id"; then
+                : # ok
+            else
+                VALIDATION_FAILURES+=("$name")
+            fi
+            GATEWAY_VALIDATE_COUNT=$((GATEWAY_VALIDATE_COUNT + 1))
+        fi
     fi
 
     REGISTERED_NAMES+=("$name")
@@ -941,10 +1138,29 @@ if [ "$SKIP_GOVERNANCE" = true ]; then
     log_info "Governance was skipped (--skip-governance). Models are registered but not"
     log_info "yet visible/callable until a MaaSAuthPolicy + MaaSSubscription exist for them"
     log_info "(create via Admin, or re-run without --skip-governance)."
+elif [ "$SKIP_VALIDATE" = true ]; then
+    echo ""
+    log_info "Validation skipped (--skip-validate). Re-run without it to exercise BBR + gateway."
+fi
+
+if [ "${#VALIDATION_FAILURES[@]}" -gt 0 ]; then
+    echo ""
+    log_warn "Validation issue(s) detected:"
+    for v in "${VALIDATION_FAILURES[@]}"; do
+        echo "  - $v"
+    done
+    log_warn "Models are registered; fix upstream key / BBR / governance and re-run with --models <name>."
 fi
 
 if [ "$DRY_RUN" = true ]; then
     exit 0
+fi
+
+if [[ "$PATH_PREFIX" == *"/v1/projects/"* ]]; then
+    echo ""
+    log_warn "IBM RHAI path prefix detected — URLRewrite alone is insufficient."
+    log_info "Apply the upstream path-prefix EnvoyFilter (see docs/08-external-models.md#ibm-rhai-envoyfilter):"
+    echo "  oc apply -f manifests/08-external-models/openai-compatible-prefixed/ibm-rhai-upstream-path-prefix-envoyfilter.yaml"
 fi
 
 DOMAIN=""

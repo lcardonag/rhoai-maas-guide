@@ -43,15 +43,150 @@ Important field meanings:
 
 ## How It Works (five resources)
 
-1. **Secret** — provider API key; labels `inference.networking.k8s.io/bbr-managed=true` *and* (RHOAI 3.4) `ipp-managed=true` when using the Compact MaaS path.
+1. **Secret** — provider API key; data key `api-key`. Labels (all three on RHOAI 3.5+): `inference.networking.k8s.io/bbr-managed=true`, `inference.networking.k8s.io/ipp-managed=true`, and **`inference.llm-d.ai/ipp-managed=true`** (required for the Inference Payload Processor / BBR credential store).
 2. **ExternalModel** — provider, targetModel, endpoint FQDN, credentialRef (+ optional path-prefix annotation).
 3. **MaaSModelRef** — catalog entry (must become *Ready*).
 4. **MaaSAuthPolicy** — who may call the model on the gateway.
 5. **MaaSSubscription** — who may mint API keys + Limitador token windows.
 
+## ExternalModel is not a Service {#externalmodel-vs-service}
+
+`ExternalModel` is a **MaaS custom resource** (`maas.opendatahub.io/v1alpha1`), not a native Kubernetes `Service`. It is a *declaration*: proxy this catalog model id to an external host using a provider API key.
+
+| Layer | What it is |
+|-------|------------|
+| **ExternalModel** | CRD — endpoint FQDN, `targetModel`, `credentialRef`, `provider` |
+| **MaaS controller** | Watches `ExternalModel` + `MaaSModelRef` and **creates** networking objects |
+
+Compare to in-cluster models:
+
+| Backend | CR you apply | Traffic runs through |
+|---------|--------------|----------------------|
+| In-cluster (e.g. Gemma on GPU) | `LLMInferenceService` | vLLM **Pod** on the cluster |
+| External (OpenAI, remote MaaS, IBM RHAI) | `ExternalModel` | **ExternalName Service** + gateway route → remote HTTPS API |
+
+After reconcile, each external model typically gets real networking resources in the model namespace (names vary slightly by RHOAI version):
+
+```bash
+oc get svc,httproute,serviceentry,destinationrule -n external-models
+# service/<name>              ExternalName → <endpoint FQDN>:443
+# service/maas-<name>         companion service
+# httproute/<name>            attached to maas-default-gateway
+# serviceentry/<name>         MESH_EXTERNAL DNS for the remote host
+```
+
+No inference pod runs on your cluster for external models — the gateway proxies **out** to the upstream API. BBR (Bridge-Based Routing) swaps the client's local `sk-oai-…` key for the upstream key stored in the labeled Secret.
+
+## Per-model import: script vs controller reconciliation {#per-model-reconciliation}
+
+`import-external-models.sh` does **not** call Authorino or Kuadrant directly. For **each** catalog id it applies CRs; the **MaaS / external-model controller** reconciles networking and policy asynchronously.
+
+### What the script applies (per model)
+
+| # | Resource | Namespace | Notes |
+|---|----------|-----------|-------|
+| 1 | **Secret** | `external-models` (default) | **Once per endpoint** — shared by all models from the same host. Labels: `bbr-managed`, `ipp-managed`, and `inference.llm-d.ai/ipp-managed` (see [Known Issues](#credentials-not-found-in-store)). |
+| 2 | **ExternalModel** | model namespace | Upstream host + `targetModel` id |
+| 3 | **MaaSModelRef** | model namespace | Catalog registration |
+| 4 | **MaaSAuthPolicy** | `models-as-a-service` | Who may **call** the model (unless `--skip-governance`) |
+| 5 | **MaaSSubscription** | `models-as-a-service` | Who may **mint keys** + token limits (`<name>-free`, unless `--skip-governance`) |
+| 6 | **HTTPRoute patch** | model namespace | Optional URLRewrite heal (polls up to ~90s) |
+
+Use `--skip-governance` when you plan to attach imported models to a **bundle subscription** in the native dashboard ([Settings → MaaS governance](./05-maas-models.md#maas-governance-native-ui)) instead of one subscription per model.
+
+### What the controller creates (connectivity)
+
+```
+ExternalModel + MaaSModelRef
+        ↓  MaaS controller reconciles
+HTTPRoute (on maas-default-gateway)
+Service (ExternalName → remote host)
+ServiceEntry + DestinationRule (Istio external mesh)
+BBR wiring (provider key injection on forward)
+```
+
+**Remote MaaS proxy example** (import from another cluster's gateway):
+
+```
+Client → your maas.<domain>/v1/chat/completions  (local sk-oai key)
+       → Authorino + Limitador (your governance)
+       → BBR → remote maas-rhdp... (upstream sk-oai in Secret)
+```
+
+### Authorino and Kuadrant (policy layer)
+
+Each `MaaSAuthPolicy` and `MaaSSubscription` tells the MaaS controller to update the **gateway policy stack** — not new Authorino or Limitador pods.
+
+| Component | What changes per imported model |
+|-----------|--------------------------------|
+| **Authorino** (via Kuadrant `AuthPolicy`) | On RHOAI 3.5+, rules aggregate into gateway-scoped `maas-gateway-auth` on `maas-default-gateway`. New model = new allow rules for groups in the auth policy. |
+| **Limitador** (via `MaaSSubscription`) | Token rate limits for that model on the subscription (default import: 10k tokens/hour per `<name>-free`). |
+| **maas-api** | Catalog grows; key validate endpoint resolves subscription + model membership. |
+
+At **request time** (same for every model):
+
+1. Gateway receives request with local `sk-oai-…`
+2. Authorino → `maas-api` `/internal/v1/api-keys/validate`
+3. Subscription check: model in key's subscription?
+4. Auth policy check: user/group allowed for this model?
+5. Limitador: within token limits?
+6. Forward → external backend (BBR injects upstream key)
+
+### Shared vs per-model resources
+
+| Shared (once per cluster / endpoint) | Per imported model |
+|--------------------------------------|--------------------|
+| `maas-default-gateway` | `ExternalModel` |
+| `maas-gateway-auth` (updated, not recreated) | `MaaSModelRef` |
+| One **Secret** per remote host | `MaaSAuthPolicy` + `MaaSSubscription` (if not `--skip-governance`) |
+| Authorino, Limitador, maas-api | HTTPRoute rule + Istio external service wiring |
+
+Importing many models with `--all` stacks dozens of routes and governance CRs on the same gateway — expect slow reconciles and added gateway memory use ([Phase 2 gateway OOM prevention](./02-platform-config.md#gateway-pod-oomkill-prevention)).
+
+### Why the script shows "still reconciling" {#import-still-reconciling}
+
+After applying `ExternalModel` + `MaaSModelRef`, the script **polls** for an `HTTPRoute` path rule before patching `URLRewrite`:
+
+```text
+[WARN] HTTPRoute gpt-oss-120b has no PathPrefix /llm/gpt-oss-120b rule yet (still reconciling)
+```
+
+Meaning: the MaaS controller has not finished creating or programming the route rule the heal step expects. The script retries every **5s** for up to **~90s**, then **continues to the next model**. It then waits up to **120s** for `MaaSModelRef` → **Ready**.
+
+**Common outcomes:**
+
+- Route heal **times out** but `MaaSModelRef` still becomes **Ready** — registration succeeded; heal is often cosmetic for [gateway-root clients](./05-maas-models.md#canonical-maas-url).
+- Default namespace `external-models` uses paths like `/external-models/<name>/…` while the heal step may look for `/llm/<name>` — warnings can appear even when the model is healthy.
+
+**Speed up bulk import:**
+
+```bash
+# Only models you need
+./scripts/import-external-models.sh --endpoint <host> --api-key "$KEY" \
+    --models granite-3-2-8b-instruct,gpt-oss-120b
+
+# Skip route-heal and/or Ready wait
+./scripts/import-external-models.sh ... --all --skip-route-heal
+./scripts/import-external-models.sh ... --all --skip-route-heal --no-wait
+
+# Register only (no upstream/gateway validation or payload-processing restart)
+./scripts/import-external-models.sh ... --all --skip-validate
+
+# Register now, bundle subscriptions in GUI later
+./scripts/import-external-models.sh ... --models foo,bar --skip-governance
+```
+
+**Verify after import:**
+
+```bash
+oc get maasmodelref -n external-models
+oc get maasmodelref -A | grep -v Ready || echo "All Ready"
+oc get svc,httproute -n external-models | head -20
+```
+
 ## Path A — Compact MaaS Admin (recommended for IBM / RHAI) {#path-a}
 
-Requires [Phase 10](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/09-optional-guis.html) (`--with-compact-maas`) and an admin in `maas-admins`.
+Requires [Phase 10](https://rh-aiservices-bu.github.io/rhoai-maas-guide/modules/main/09-optional-guis.html) (`--with-compact-maas`) and an admin in `mass-admins` (or legacy `maas-admins`; `apply-phase2-rbac.sh` adds the installing user).
 
 1. Deploy MaaS without local models:
 
@@ -104,8 +239,9 @@ It:
 
 1. Calls `GET https://{endpoint}{path-prefix}/v1/models` with your API key (a path pasted into `--endpoint` is auto-detected as the path prefix).
 2. Lists discovered model ids; select with `--all`, `--models id1,id2`, `--filter <regex>`, or an interactive prompt.
-3. For each selected id: creates one *shared* credential Secret per endpoint (labels `inference.networking.k8s.io/bbr-managed=true` + `inference.networking.k8s.io/ipp-managed=true`), an `ExternalModel` (name sanitized from the model id), a `MaaSModelRef`, and — unless `--skip-governance` — an open `MaaSAuthPolicy` + `MaaSSubscription` (`system:authenticated`, 10k tokens/hour by default).
-4. Heals the HTTPRoute `URLRewrite` for the catalog `/<namespace>/<name>` prefix, the same way Compact MaaS Admin does. External-model HTTPRoutes are created asynchronously by the MaaS controller, so the heal step polls (18 attempts, 5s apart ≈ 90s) instead of assuming the route exists immediately; if it never shows up in time, the script warns and *moves on to the next model* instead of aborting the whole `--all`/`--models` run.
+3. For each selected id: creates one *shared* credential Secret per endpoint (labels `inference.networking.k8s.io/bbr-managed=true`, `inference.networking.k8s.io/ipp-managed=true`, and `inference.llm-d.ai/ipp-managed=true`), an `ExternalModel` (name sanitized from the model id), a `MaaSModelRef`, and — unless `--skip-governance` — an open `MaaSAuthPolicy` + `MaaSSubscription` (`system:authenticated`, 10k tokens/hour by default).
+4. **Validates** like Compact MaaS Admin **Test connection**: upstream chat probe on the first selected model, restart `payload-processing` so BBR loads the credential Secret, then gateway E2E on the first registered model (mint ephemeral `sk-oai-*` → chat). Use `--validate-all` to test every model, or `--skip-validate` to register only.
+5. Heals the HTTPRoute `URLRewrite` for the catalog `/<namespace>/<name>` prefix, the same way Compact MaaS Admin does. External-model HTTPRoutes are created asynchronously by the MaaS controller, so the heal step polls (18 attempts, 5s apart ≈ 90s) instead of assuming the route exists immediately; if it never shows up in time, the script warns and *moves on to the next model* instead of aborting the whole `--all`/`--models` run.
 
 Every mutation is `oc apply` (or an idempotent `oc patch` for the HTTPRoute), so **re-running the same command against the same source is always safe** — already-created Secret/ExternalModel/MaaSModelRef/MaaSAuthPolicy/MaaSSubscription are simply reconciled to the same state, and the HTTPRoute heal short-circuits once it detects the desired `URLRewrite` is already in place.
 
@@ -114,12 +250,19 @@ Every mutation is `oc apply` (or an idempotent `oc patch` for the HTTPRoute), so
 > **Important:** If the provider's base URL already ends in `/v1` (e.g. `https://host/v1`), pass the **host only** to `--endpoint` — do *not* also pass `/v1` (or `--path-prefix /v1`). The script always appends `/v1/models` itself, so `--endpoint host/v1` becomes `GET https://host/v1/v1/models` and 404s. Only use `--path-prefix` for a base path *before* `/v1` (e.g. IBM RHAI's `/v1/projects/<uuid>/inference`, which is followed by its own `/v1/...`).
 
 ```bash
-# Stock OpenAI, register every model
-./scripts/import-external-models.sh --endpoint api.openai.com \
+# Stock OpenAI, register every model (--preset or explicit --endpoint)
+./scripts/import-external-models.sh --preset openai \
     --api-key "$OPENAI_API_KEY" --all
 
+# OpenRouter (OpenAI-compatible API at openrouter.ai/api/v1/...)
+./scripts/import-external-models.sh --preset openrouter \
+    --api-key "$OPENROUTER_API_KEY" --list
+
+./scripts/import-external-models.sh --preset openrouter \
+    --api-key "$OPENROUTER_API_KEY" --all
+
 # IBM RHAI / project-prefixed host, pick specific models, Compact MaaS namespace
-./scripts/import-external-models.sh \
+./scripts/import-external-models.sh --preset ibm-rhai \
     --endpoint us-east.rhai.ibm.com \
     --path-prefix /v1/projects/<uuid>/inference \
     --api-key "$RHAI_API_KEY" --namespace llm \
@@ -145,7 +288,23 @@ Every mutation is `oc apply` (or an idempotent `oc patch` for the HTTPRoute), so
 ./scripts/import-external-models.sh --endpoint api.openai.com --api-key "$OPENAI_API_KEY" --all --dry-run
 ```
 
-See `./scripts/import-external-models.sh --help` for the full option list (custom `--secret-name`, `--governance-namespace`, `--restricted`, `--token-limit`/`--token-window`, `--skip-namespace`, `--skip-route-heal`, `--no-wait`).
+See `./scripts/import-external-models.sh --help` for the full option list (`--preset openai|openrouter|ibm-rhai`, custom `--secret-name`, `--governance-namespace`, `--restricted`, `--token-limit`/`--token-window`, `--skip-namespace`, `--skip-route-heal`, `--no-wait`, `--skip-validate`, `--validate-all`, `--skip-bbr-reload`).
+
+### Validation (default on, mirrors Compact MaaS **Test connection**)
+
+Unless you pass `--skip-validate`, the script runs three checks after registration:
+
+| Step | What it does | Skip with |
+|------|----------------|-----------|
+| Upstream chat probe | `POST …/v1/chat/completions` on the **first** selected model using the provider key | `--skip-validate` |
+| BBR credential reload | `oc rollout restart deployment/payload-processing -n openshift-ingress` so the apikey-injection store picks up the new Secret | `--skip-validate` or `--skip-bbr-reload` |
+| Gateway E2E | Mint ephemeral `sk-oai-*` via `maas-api`, call `https://maas.<domain>/v1/chat/completions` for the first registered model | `--skip-validate` |
+
+Use `--validate-all` to run the gateway E2E step for **every** selected model (slower on large catalogs). Use `--skip-validate` for register-only runs (e.g. bulk import before governance is ready); re-run without it later to exercise BBR + gateway.
+
+> **Tip:** If you created or rotated a credential Secret manually (Path C YAML, `setup-maas.sh` Phase 8, or `oc create secret`), apply all three labels (see [Known Issues](#credentials-not-found-in-store)) and restart `payload-processing` the same way before testing inference.
+
+> **Tip:** To register a single model with plain `oc` (no script), see [Path C — CLI recipe](./08-external-models.md#cli-recipe).
 
 ### Resuming a partial `--all` / `--models` run
 
@@ -237,7 +396,7 @@ There is no `uninstall`/`delete` counterpart to `import-external-models.sh` — 
 
 ### Rotate a key vs. remove a model
 
-- **Rotate only** (keep the model, replace the provider key): don't delete anything below. Compact MaaS Admin → *Model refs* → *Edit* → *Update provider API key* → *Test connection* → *Save* (rewrites the existing Secret in place). Manual equivalent: `oc create secret generic <name>-credentials --from-literal=api-key="$NEW_KEY" -n llm --dry-run=client -o yaml | oc apply -f -`, then re-apply the `bbr-managed`/`ipp-managed` labels (see [Known Issues](#known-issues) if the labels don't stick after an upgrade).
+- **Rotate only** (keep the model, replace the provider key): don't delete anything below. Compact MaaS Admin → *Model refs* → *Edit* → *Update provider API key* → *Test connection* → *Save* (rewrites the existing Secret in place). Manual equivalent: `oc create secret generic <name>-credentials --from-literal=api-key="$NEW_KEY" -n llm --dry-run=client -o yaml | oc apply -f -`, then re-apply all three Secret labels (`bbr-managed`, `ipp-managed`, `inference.llm-d.ai/ipp-managed`) and restart `payload-processing` (see [Known Issues](#known-issues) if labels don't stick after an upgrade).
 - **Remove one model** on a host that serves several: run steps 1–4 below for that model only, then check step 5 before touching the shared Secret — other `ExternalModel` CRs on the same host are probably still using it.
 - **Remove an entire endpoint** (every model registered from one host): repeat steps 1–4 for *each* model on that host, confirm no `ExternalModel` still references the shared Secret, *then* delete the Secret last.
 
@@ -357,6 +516,196 @@ oc delete secret ${SECRET} -n ${NS}
 
 ## Path C — YAML / oc (guide manifests + custom OpenAI-compatible) {#path-c}
 
+### Register one external model (CLI only, no script) {#cli-recipe}
+
+Use this when you want a single model (or a few) without `import-external-models.sh`. The MaaS controller still creates `Service`, `HTTPRoute`, `ServiceEntry`, and related networking — you only apply the five CRs below.
+
+**Prerequisites:** MaaS platform ready (Phases 1–4); `curl -sk https://maas.<domain>/maas-api/health` succeeds.
+
+Set variables (edit for your provider):
+
+```bash
+# Model identity (Kubernetes-safe name; often matches upstream model id)
+NAME="gpt-4o-mini"
+NS="external-models"                    # or llm
+GOV_NS="models-as-a-service"
+
+# Upstream OpenAI-compatible API (FQDN only — no https://, no path)
+ENDPOINT="api.openai.com"
+TARGET_MODEL="gpt-4o-mini"              # id sent in JSON body upstream
+PROVIDER="openai"                       # BBR translator (usually openai)
+
+# Provider API key (OpenAI key, remote MaaS sk-oai-…, IBM RHAI key, etc.)
+PROVIDER_API_KEY="${OPENAI_API_KEY}"
+
+# Governance (subscription + auth policy names)
+SUB_NAME="${NAME}-free"
+POLICY_NAME="${NAME}-access"
+```
+
+**Step 1 — Namespace** (skip if it exists):
+
+```bash
+oc create namespace "${NS}" 2>/dev/null || true
+oc label namespace "${NS}" \
+  opendatahub.io/generated-namespace=true \
+  maas.opendatahub.io/gateway-access=true --overwrite
+```
+
+**Step 2 — Credential Secret** (required for BBR upstream auth):
+
+```bash
+SECRET_NAME="${NAME}-credentials"
+
+oc create secret generic "${SECRET_NAME}" \
+  --from-literal=api-key="${PROVIDER_API_KEY}" \
+  -n "${NS}" --dry-run=client -o yaml | oc apply -f -
+
+oc label secret "${SECRET_NAME}" -n "${NS}" \
+  inference.networking.k8s.io/bbr-managed=true \
+  inference.networking.k8s.io/ipp-managed=true \
+  inference.llm-d.ai/ipp-managed=true --overwrite
+```
+
+**Step 3 — ExternalModel + MaaSModelRef:**
+
+```bash
+oc apply -f - <<EOF
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: ${NAME}
+  namespace: ${NS}
+spec:
+  provider: ${PROVIDER}
+  targetModel: ${TARGET_MODEL}
+  endpoint: ${ENDPOINT}
+  credentialRef:
+    name: ${SECRET_NAME}
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSModelRef
+metadata:
+  name: ${NAME}
+  namespace: ${NS}
+  annotations:
+    openshift.io/display-name: "${NAME}"
+spec:
+  modelRef:
+    kind: ExternalModel
+    name: ${NAME}
+EOF
+```
+
+**Step 4 — MaaSAuthPolicy + MaaSSubscription** (skip if you will attach this model to a bundle subscription in the GUI):
+
+```bash
+oc apply -f - <<EOF
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSAuthPolicy
+metadata:
+  name: ${POLICY_NAME}
+  namespace: ${GOV_NS}
+spec:
+  modelRefs:
+    - name: ${NAME}
+      namespace: ${NS}
+  subjects:
+    groups:
+      - name: system:authenticated
+    users: []
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSSubscription
+metadata:
+  name: ${SUB_NAME}
+  namespace: ${GOV_NS}
+spec:
+  owner:
+    groups:
+      - name: system:authenticated
+    users: []
+  modelRefs:
+    - name: ${NAME}
+      namespace: ${NS}
+      tokenRateLimits:
+        - limit: 10000
+          window: 1h
+  priority: 10
+EOF
+```
+
+**Step 5 — Wait for catalog registration:**
+
+```bash
+oc wait --for=jsonpath='{.status.phase}'=Ready \
+  maasmodelref/${NAME} -n "${NS}" --timeout=180s
+
+oc get maasmodelref ${NAME} -n "${NS}" -o wide
+oc get svc,httproute -n "${NS}" | grep "${NAME}"
+```
+
+**Step 6 — Mint a key and test** (as an entitled user):
+
+```bash
+CLUSTER_DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
+MAAS_URL="https://maas.${CLUSTER_DOMAIN}"
+
+API_KEY=$(curl -sk -X POST "${MAAS_URL}/maas-api/v1/api-keys" \
+  -H "Authorization: Bearer $(oc whoami -t)" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"test-${NAME}\",\"subscription\":\"${SUB_NAME}\",\"expiresIn\":\"1h\"}" \
+  | jq -r '.key')
+
+MODEL_ID=$(curl -sk "${MAAS_URL}/v1/models" \
+  -H "Authorization: Bearer ${API_KEY}" | jq -r '.data[] | select(.id | contains("'${NAME}'")) | .id' | head -1)
+
+curl -sk "${MAAS_URL}/v1/chat/completions" \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${MODEL_ID}\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":32}"
+```
+
+#### Remote MaaS gateway (proxy another cluster)
+
+Same recipe; point `ENDPOINT` at the **remote gateway host** (no `https://`) and use the remote **`sk-oai-…`** as `PROVIDER_API_KEY`:
+
+```bash
+NAME="gpt-oss-120b"
+ENDPOINT="maas-rhdp.apps.maas.redhatworkshops.io"
+TARGET_MODEL="gpt-oss-120b"
+PROVIDER_API_KEY="sk-oai-..."   # key from the *remote* cluster
+```
+
+#### IBM RHAI / path-prefixed upstream
+
+`spec.endpoint` is still FQDN only. Add the project path as an annotation and apply the EnvoyFilter — see [IBM RHAI / path-prefixed](#ibm-rhai-path-prefixed-yaml) below.
+
+```bash
+# Add to ExternalModel metadata.annotations:
+#   compact-maas/upstream-path-prefix: "/v1/projects/<uuid>/inference"
+oc apply -f manifests/08-external-models/openai-compatible-prefixed/ibm-rhai-upstream-path-prefix-envoyfilter.yaml
+```
+
+#### Apply guide manifests with Kustomize (stock OpenAI / Gemini / Bedrock)
+
+For the bundled examples under `manifests/08-external-models/<provider>/`, create the provider secret first, then:
+
+```bash
+# OpenAI example
+oc create secret generic openai-api-key \
+  --from-literal=api-key="$OPENAI_API_KEY" -n external-models \
+  --dry-run=client -o yaml | oc apply -f -
+oc label secret openai-api-key -n external-models \
+  inference.networking.k8s.io/bbr-managed=true \
+  inference.networking.k8s.io/ipp-managed=true \
+  inference.llm-d.ai/ipp-managed=true --overwrite
+
+oc apply -k manifests/08-external-models/openai/
+```
+
+Gemini / Bedrock: same pattern with `manifests/08-external-models/gemini/` or `bedrock/` and the matching secret name from that tree's `external-model.yaml`.
+
 ### Skip local inference on a new cluster
 
 ```bash
@@ -376,6 +725,8 @@ See sections below for guided OpenAI, Gemini, and Bedrock. Automated:
     --external-model-provider openai \
     --external-model-api-key "$OPENAI_API_KEY"
 ```
+
+> **Note:** Phase 8 applies `bbr-managed` on the provider Secret. On RHOAI 3.5+, also label `inference.networking.k8s.io/ipp-managed=true` and `inference.llm-d.ai/ipp-managed=true`, then restart `payload-processing` — or use `import-external-models.sh`, which applies all three labels and reloads BBR during validation. See [credentials not found in store](#credentials-not-found-in-store).
 
 ### Custom OpenAI-compatible host (root `/v1`)
 
@@ -403,7 +754,8 @@ oc create secret generic my-saas-api-key \
   -n external-models --dry-run=client -o yaml | oc apply -f -
 oc label secret my-saas-api-key -n external-models \
   inference.networking.k8s.io/bbr-managed=true \
-  inference.networking.k8s.io/ipp-managed=true --overwrite
+  inference.networking.k8s.io/ipp-managed=true \
+  inference.llm-d.ai/ipp-managed=true --overwrite
 ```
 
 Then apply matching `MaaSModelRef`, `MaaSAuthPolicy`, and `MaaSSubscription` (see OpenAI `maas/` examples). After the HTTPRoute appears, ensure URLRewrite strips `/llm/<name>` → `/` (Compact MaaS heals this; for pure `oc`, patch as in [URLRewrite](#urlrewrite)).
@@ -513,10 +865,12 @@ oc create secret generic openai-api-key \
     --dry-run=client -o yaml | oc apply -f -
 
 oc label secret openai-api-key -n external-models \
-    inference.networking.k8s.io/bbr-managed=true --overwrite
+    inference.networking.k8s.io/bbr-managed=true \
+    inference.networking.k8s.io/ipp-managed=true \
+    inference.llm-d.ai/ipp-managed=true --overwrite
 ```
 
-> **Important:** Without `bbr-managed=true`, upstream calls get 401 (provider key never injected).
+> **Important:** Without `bbr-managed=true`, upstream calls get 401 (provider key never injected). On RHOAI 3.5+, also apply `inference.llm-d.ai/ipp-managed=true` — see [credentials not found in store](#credentials-not-found-in-store).
 
 ### Step 2: ExternalModel CR
 
@@ -609,6 +963,29 @@ Manifests: `manifests/08-external-models/bedrock/`. Use Mantle host `bedrock-man
 ```
 
 ## Known Issues {#known-issues}
+
+### credentials not found in store (RHOAI 3.5+) {#credentials-not-found-in-store}
+
+Gateway inference fails with `authType 'apikey' credentials not found in store` even though the provider key works when you curl the upstream API directly. Registration (`MaaSModelRef` Ready) and local MaaS API keys are fine — BBR never loaded the upstream Secret.
+
+**Cause:** The Inference Payload Processor (IPP) credential watcher requires **`inference.llm-d.ai/ipp-managed=true`** on the provider Secret (in addition to the legacy `inference.networking.k8s.io/ipp-managed` label). BBR caches Secrets at `payload-processing` startup; creating or relabeling a Secret does not reload the store until the deployment restarts.
+
+**Fix:**
+
+```bash
+SECRET=<shared-or-per-model-credentials>   # e.g. maas-rhdp-apps-maas-redhatworkshops-io-credentials
+NS=external-models                         # or llm — wherever credentialRef points
+
+oc label secret "$SECRET" -n "$NS" \
+  inference.networking.k8s.io/bbr-managed=true \
+  inference.networking.k8s.io/ipp-managed=true \
+  inference.llm-d.ai/ipp-managed=true --overwrite
+
+oc rollout restart deployment/payload-processing -n openshift-ingress
+oc rollout status deployment/payload-processing -n openshift-ingress --timeout=90s
+```
+
+`import-external-models.sh` applies all three labels and restarts `payload-processing` during the default validation step (skip with `--skip-validate` / `--skip-bbr-reload`).
 
 ### ext-proc filter not inserted (RHOAIENG-68594)
 

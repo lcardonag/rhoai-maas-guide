@@ -55,6 +55,14 @@ Each phase has step-by-step instructions, status gates, and troubleshooting.
 | --- | --- | --- |
 | [8. External Models](https://github.com/rh-aiservices-bu/rhoai-maas-guide/blob/main/docs/08-external-models.md) _(optional)_ | Expose third-party LLM APIs (OpenAI, Bedrock, Gemini) through the MaaS gateway | 5-10 min |
 
+### Optional GUIs & billing
+
+| Phase | Description | Time |
+| --- | --- | --- |
+| [9–10. Optional GUIs](./09-optional-guis.md) _(optional)_ | **Compact MaaS** (recommended native UI/BFF) and/or **LiteMaaS + LiteLLM** (PoC) | 10–25 min (Compact MaaS builds) |
+| [11. Lago billing](./11-lago-billing.md) _(optional)_ | Lago platform + MaaS budget-entity scaffold (auto Phase 7 if needed) | 15–30 min |
+| [12. OpenMeter billing](./12-openmeter-billing.md) _(optional, alternative)_ | Apache-2.0 metering alternative to Lago — same enforcement model | 20–40 min |
+
 ## Choosing a model deployment path
 
 Phases **1–4** install the platform only. See [Automated Setup](./quick-start.md) and [Phase 5](./05-maas-models.md) for details.
@@ -64,7 +72,8 @@ Phases **1–4** install the platform only. See [Automated Setup](./quick-start.
 | **A — Full script** | Quick validation with a bundled model | `./scripts/setup-maas.sh` or `--model simulator` |
 | **B — Script + GUI** | Custom catalog model (e.g. Gemma) | `./scripts/setup-maas.sh --skip-models` → deploy with **Publish as MaaS** |
 | **C — Register existing** | Model deployed before MaaS was ready | [Manual MaaS registration](./05-maas-models.md#register-existing-gui-model) |
-| **D — External only** | No in-cluster GPU | `--skip-models` → [Phase 8](https://github.com/rh-aiservices-bu/rhoai-maas-guide/blob/main/docs/08-external-models.md) |
+| **D — External only** | No in-cluster GPU | `--skip-models` → [Phase 8](https://github.com/rh-aiservices-bu/rhoai-maas-guide/blob/main/docs/08-external-models.md) → optional `--with-compact-maas` |
+| **E — Platform + console** | Custom catalog model (e.g. Gemma) + self-serve UI | `--skip-models` → publish in dashboard → `--from-phase 10 --with-compact-maas` |
 
 **RHOAI 3.5 dashboard:** **Gen AI Studio → AI asset endpoints** (Models) and **API keys** (sibling menu). One model may show two URL forms — that is normal.
 
@@ -80,8 +89,17 @@ For end-to-end deployment using a single script, see the [Automated Setup](./qui
 | `granite-tiny-gpu` | Yes | < 40 GiB | Small GPU (T4, L4, A10) |
 | `gpt-oss-20b` | Yes | >= 40 GiB | Large GPU (L40S, A100, H100) |
 
+## Planned (not implemented)
+
+- [Capacity planning: 1M subscribers](./13-capacity-planning.md) — multi-cell OpenShift sizing (Oracle, IBM, Azure, etc.), external inference, re-engineering checklist
+- [Compact MaaS enhancements](./compact-maas-enhancements.md) — gateway-root URL mode + multi-model key UX
+
+**Billing:** Use [Phase 11 Lago](./11-lago-billing.md) for commercial metering (wallets, invoices, Stripe). [Phase 12 OpenMeter](./12-openmeter-billing.md) is an Apache-2.0 alternative with the same MaaS enforcement model — pick **one** backend per cluster.
+
 ## Documentation
 
+- [MaaS Namespaces Reference](./maas-namespaces.md) — platform vs. model namespaces and how they connect
+- [Architecture & Request Flow](./08-architecture.md) — inference and API-key flow step by step
 - [RHOAI 3.4 MaaS Official Docs](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index)
 - [RHOAI 3.5 MaaS Official Docs](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/govern_llm_access_with_models-as-a-service/index)
 - [Upstream MaaS Documentation](https://opendatahub-io.github.io/models-as-a-service/latest/)

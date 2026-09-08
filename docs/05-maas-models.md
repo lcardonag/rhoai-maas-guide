@@ -88,6 +88,40 @@ Defines rate-limiting tiers for model access. Each model ships with two tiers:
 - **Premium tier** (priority 20): 100,000 tokens/min for all authenticated users
 Higher-priority subscriptions take precedence. You can adjust limits, windows, and subject groups to match your usage policies.
 
+### Per-model vs bundle subscriptions
+
+Subscriptions are independent. You can run **both** patterns on the same cluster:
+
+| Pattern | Example | Use case |
+|---------|---------|----------|
+| **Per-model** | `gemma-4-e4b-it-free`, `gpt-4o-mini-free` | Different limits, owners, or billing per model |
+| **Bundle** | `coding-models` → CodeLlama + GPT-4o-mini + Granite | One API key for a use case (e.g. coding) |
+
+- One **MaaSSubscription** can list **multiple** `modelRefs` (GUI: **Add models** on the same subscription).
+- One **API key** binds to **one** subscription and can call **all models** on that subscription (set `model` in the JSON body at the [gateway root](#canonical-maas-url)).
+- The same model may appear in more than one subscription (e.g. à la carte + bundle) with different limits.
+- Each subscription needs a matching **MaaSAuthPolicy** (or use **Create a matching authorization policy** in the GUI).
+
+`scripts/import-external-models.sh` creates one `<name>-free` subscription per model by default. Use `--skip-governance` and attach imported models to a bundle in the dashboard instead. By default the script also validates registration (upstream chat probe, BBR credential reload, gateway E2E on the first model); use `--skip-validate` for register-only bulk imports.
+
+### MaaS governance (native UI) {#maas-governance-native-ui}
+
+On **RHOAI 3.5+**, admins create subscriptions and auth policies under **Settings → MaaS governance** (not inside **Gen AI Studio → API keys**, which is for end-user key minting).
+
+1. **Settings → MaaS governance → Create subscription**
+2. Add **groups** (e.g. `system:authenticated`), **models** (in-cluster + external), **token limits**
+3. Check **Create a matching authorization policy**
+4. End users: **Gen AI Studio → API keys → Create API key** → pick the subscription
+
+Enable the auth-policy admin UI if the governance page is incomplete:
+
+```bash
+oc patch odhdashboardconfig odh-dashboard-config -n redhat-ods-applications --type=merge \
+  -p '{"spec":{"dashboardConfig":{"maasAuthPolicies":true}}}'
+```
+
+See [Phase 8 — external models](./08-external-models.md#per-model-reconciliation) for what the import script creates per model vs what the controller reconciles on the gateway.
+
 ## Deploying a Model
 
 > **Note:**
@@ -250,14 +284,64 @@ For GPU models, use the `id` and `subscription` from your `MaaSSubscription` (e.
 
 ### Troubleshooting inference and AI asset endpoints
 
-#### Duplicate Gemma rows with different endpoints
+#### Canonical MaaS URL (what clients should use) {#canonical-maas-url}
 
-A single `LLMInferenceService` on `maas-default-gateway` advertises multiple valid URL forms in `status.addresses` (namespace path and `publishers/…/models/…` path). **Gen AI Studio → AI asset endpoints** may show both — that is expected, not two separate deployments.
+For **MaaS-published** models, the only client-facing base URL is the **gateway root**:
+
+```text
+https://maas.<cluster-domain>/
+```
+
+Examples:
+
+```bash
+MAAS_URL="https://maas.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')"
+
+# List models
+curl -sk "${MAAS_URL}/v1/models" -H "Authorization: Bearer ${API_KEY}"
+
+# Infer — model id goes in the JSON body, not in the URL path
+curl -sk "${MAAS_URL}/v1/chat/completions" \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"publishers/my-first-model/models/redhataigemma-4-e4b-it","messages":[{"role":"user","content":"hola"}]}'
+```
+
+Confirm the MaaS controller resolved the same endpoint:
+
+```bash
+oc get maasmodelref -n <model-namespace> -o custom-columns=\
+NAME:.metadata.name,\
+ENDPOINT:.status.endpoint,\
+MODEL_ID:.status.resolvedModelAlias
+```
+
+Expected for a GUI-published Gemma on `maas-default-gateway`:
+
+| Field | Example |
+|-------|---------|
+| `status.endpoint` | `https://maas.apps.<domain>/` |
+| `status.resolvedModelAlias` | `publishers/<namespace>/models/<llmisvc-name>` |
+
+Do **not** call per-model paths such as `/my-first-model/redhataigemma-4-e4b-it/v1/...` or `/publishers/.../v1/...` unless you are debugging routing. MaaS API keys and the catalog use the **gateway root** + `model` in the body.
+
+#### Duplicate entries in AI asset endpoints / playground
+
+A single `LLMInferenceService` on `maas-default-gateway` advertises multiple **model identifiers** in `status.addresses` (short name `redhataigemma-4-e4b-it` and publishers alias `publishers/…/models/…`). **Gen AI Studio → AI asset endpoints** may list both in the **Endpoints** column — that is KServe/RHOAI UI behavior, not two deployments.
+
+| What you see | Use it? |
+|--------------|---------|
+| `https://maas.<domain>/` (MaaS gateway root) | **Yes** — canonical for API keys |
+| `publishers/…/models/…` | **Model id** for the JSON `model` field — not a separate base URL |
+| `redhataigemma-4-e4b-it` (short name) | **No** — ignore for MaaS clients; playground may 404 if selected |
+
+**Playground:** the `lsd-genai-playground` stack should register only the MaaS provider pointing at `https://maas.<domain>/v1` with model id `publishers/…/models/…`. If a second provider (`vllm-inference-1` with the namespace path) appears, remove it from ConfigMap `llama-stack-config` in the project namespace and restart `deployment/lsd-genai-playground`.
 
 Remove stale routes from earlier experiments (for example an old `llama-32-3b-instruct-route` on `openshift-ai-inference`):
 
 ```bash
 oc delete httproute llama-32-3b-instruct-route -n my-first-model --ignore-not-found
+oc delete servingruntime llama-32-3b-instruct -n my-first-model --ignore-not-found
 ```
 
 #### API key works for `/v1/models` but inference returns `401`

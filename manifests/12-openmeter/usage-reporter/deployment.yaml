@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: usage-reporter
+  namespace: maas-billing
+  labels:
+    app.kubernetes.io/name: usage-reporter
+    app.kubernetes.io/part-of: maas-billing
+    maas-billing/backend: openmeter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: usage-reporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: usage-reporter
+        app.kubernetes.io/part-of: maas-billing
+        maas-billing/backend: openmeter
+    spec:
+      serviceAccountName: maas-billing
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reporter
+          image: maas-billing:latest
+          imagePullPolicy: Always
+          args: ["reporter"]
+          envFrom:
+            - configMapRef:
+                name: maas-billing-config
+          env:
+            - name: OPENMETER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: maas-billing-secrets
+                  key: OPENMETER_API_KEY
+                  optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi

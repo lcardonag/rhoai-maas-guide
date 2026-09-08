@@ -19,12 +19,16 @@ This runs Phases 0–6 by default. Phase 5 is skipped when any `LLMInferenceServ
 | Option | Description | Default |
 | --- | --- | --- |
 | `--model <name>` | Model to deploy: `simulator` (CPU), `granite-tiny-gpu` (small GPU), `gpt-oss-20b` (large GPU), `auto` (auto-detect by GPU VRAM) | `auto` |
-| `--from-phase <N>` | Start from phase N (0-10), skipping earlier phases | `0` |
+| `--from-phase <N>` | Start from phase N (0-12), skipping earlier phases | `0` |
 | `--skip-models` | Skip Phase 5 (model deployment) |  |
 | `--skip-verify` | Skip Phase 6 (verification) |  |
 | `--with-observability` | Also run Phase 7 (COO + Gateway telemetry) |  |
 | `--with-litemaas` | Also run Phase 9 (LiteMaaS + LiteLLM PoC; sibling `litemaas-rhoai`) |  |
-| `--with-compact-maas` | Also run Phase 10 (Compact MaaS; sibling `compact-maas`) |  |
+| `--with-compact-maas` | Also run Phase 10 (Compact MaaS; sibling `compact-maas` or `rhoai-maas-console`) |  |
+| `--with-lago-billing` | Also run Phase 11 (Lago + maas-billing scaffold; auto Phase 7 if telemetry missing) |  |
+| `--skip-lago-platform` | With Phase 11: skip Lago Helm (external Lago) |  |
+| `--with-openmeter-billing` | Also run Phase 12 (OpenMeter + maas-billing scaffold; auto Phase 7 if telemetry missing) |  |
+| `--skip-openmeter-platform` | With Phase 12: skip OpenMeter Helm (external OpenMeter) |  |
 | `--dry-run` | Preview what would be applied without making changes |  |
 
 ## Phases
@@ -40,7 +44,23 @@ This runs Phases 0–6 by default. Phase 5 is skipped when any `LLMInferenceServ
 | 6 | Verify - 6-phase E2E (API, auth, rate limits, cleanup) | 3-5 min |
 | 7 | Observability - COO subscription + Gateway TelemetryPolicy | 2-3 min |
 | 9 | LiteMaaS + LiteLLM (optional) - sibling install into `litemaas` | 5-15 min |
-| 10 | Compact MaaS (optional) - thin native UI into `compact-maas` | 5-15 min |
+| 10 | Compact MaaS (optional) - thin native UI into `compact-maas` (OpenShift image builds) | 10-25 min |
+| 11 | Lago billing (optional) - Lago Helm + `maas-billing` base; auto Phase 7 if needed | 15-30 min |
+| 12 | OpenMeter billing (optional) - OpenMeter Helm + `maas-billing`; auto Phase 7 if needed | 20-40 min |
+
+Pick **one** billing backend per cluster (**Lago recommended** for commercial UX; OpenMeter is an Apache-2.0 alternative). `setup-maas.sh` refuses to install the second backend while the first is present and prints removal steps.
+
+### Switch from OpenMeter to Lago
+
+If Phase 12 (OpenMeter) is already installed:
+
+```bash
+./scripts/uninstall-openmeter-billing.sh
+./scripts/setup-maas.sh --from-phase 11 --with-lago-billing
+./scripts/verify-lago.sh
+```
+
+See [Lago billing](./11-lago-billing.md#switch-from-openmeter-to-lago) for enrollment and tier template notes.
 
 ## Common Usage Patterns
 
@@ -67,7 +87,45 @@ For a fresh cluster with no MaaS components:
 ./scripts/setup-maas.sh --with-compact-maas --with-litemaas
 ```
 
-See [Optional GUIs](./09-optional-guis.md) for sibling repo paths and when to choose each.
+See [Optional GUIs](./09-optional-guis.md) for sibling repo clone paths and when to choose each.
+
+GUI-only after core MaaS is already installed:
+
+```bash
+./scripts/setup-maas.sh --from-phase 10 --with-compact-maas
+# If only rhoai-maas-console is cloned:
+COMPACT_MAAS_DIR=../rhoai-maas-console ./scripts/setup-maas.sh --from-phase 10 --with-compact-maas
+
+# After deploy (~10–25 min): verify Compact MaaS + native key mint (must pass)
+./scripts/verify-guis.sh --compact-maas
+# If key mint fails: ./scripts/fix-compact-maas-native-maas.sh [--apply-fix]
+```
+
+### Lago billing (optional, standalone or with Compact MaaS)
+
+```bash
+./scripts/setup-maas.sh --from-phase 11 --with-lago-billing
+# or
+./scripts/install-lago-billing.sh
+
+# With product console
+./scripts/setup-maas.sh --from-phase 10 --with-compact-maas --with-lago-billing
+```
+
+Phase 11 installs **Phase 7 gateway telemetry** automatically when `TelemetryPolicy/maas-telemetry` is missing (required for the future `usage-reporter`). See [Lago billing](./11-lago-billing.md).
+
+### OpenMeter billing (optional Apache-2.0 alternative to Lago)
+
+```bash
+./scripts/setup-maas.sh --from-phase 12 --with-openmeter-billing
+# or
+./scripts/install-openmeter-billing.sh
+
+# With Compact MaaS
+./scripts/setup-maas.sh --from-phase 10 --with-compact-maas --with-openmeter-billing
+```
+
+See [OpenMeter billing](./12-openmeter-billing.md). Do not combine `--with-lago-billing` and `--with-openmeter-billing` on the same cluster. To migrate to Lago, run `./scripts/uninstall-openmeter-billing.sh` first.
 
 ### Platform first, then GUI model (custom catalog weights)
 

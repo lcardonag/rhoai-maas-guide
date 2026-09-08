@@ -54,6 +54,7 @@ Each phase has step-by-step instructions, status gates, and troubleshooting in [
 |-------|-------------|
 | [7. Observability](docs/07-observability.md) | COO + gateway telemetry (`--with-observability`) |
 | [9–10. GUIs](docs/09-optional-guis.md) | Compact MaaS (`--with-compact-maas`) or LiteMaaS (`--with-litemaas`) |
+| [11. Lago billing](docs/11-lago-billing.md) | Budget entities, usage, graduated throttling (`--with-lago-billing`) |
 
 ## Automated setup
 
@@ -70,7 +71,7 @@ Phases are idempotent — re-running skips completed work.
 ./scripts/setup-maas.sh --from-phase 4
 ```
 
-Common flags: `--model simulator|granite-tiny-gpu|gpt-oss-20b|auto`, `--skip-verify`, `--with-observability`, `--with-compact-maas`, `--with-litemaas`, `--dry-run`. See [quick-start](docs/quick-start.md).
+Common flags: `--model simulator|granite-tiny-gpu|gpt-oss-20b|auto`, `--skip-verify`, `--with-observability`, `--with-compact-maas`, `--with-litemaas`, `--with-lago-billing`, `--dry-run`. See [quick-start](docs/quick-start.md).
 
 **Script helpers (Phases 2 & 4):** syncs `default-gateway-tls` for external inference, applies **2Gi** Istio proxy limits on `maas-default-gateway`, `data-science-gateway`, and `openshift-ai-inference` (see `manifests/02-platform-config/`).
 
@@ -136,9 +137,13 @@ Helper: `./scripts/test-inference.sh --base-url "${MAAS_URL}" --api-key "${API_K
 ```bash
 ./scripts/setup-maas.sh --skip-models --with-compact-maas   # optional GUI
 
-./scripts/import-external-models.sh \
-  --endpoint api.openai.com --api-key "$OPENAI_API_KEY" \
-  --namespace llm --all
+# OpenAI, OpenRouter, or IBM RHAI (see --help for --preset)
+# Default: validates upstream + BBR reload + gateway E2E on first model (--skip-validate to register only)
+./scripts/import-external-models.sh --preset openai \
+  --api-key "$OPENAI_API_KEY" --namespace llm --all
+
+./scripts/import-external-models.sh --preset openrouter \
+  --api-key "$OPENROUTER_API_KEY" --namespace llm --all
 ```
 
 Details: [docs/08-external-models.md](docs/08-external-models.md).
@@ -151,6 +156,7 @@ Details: [docs/08-external-models.md](docs/08-external-models.md).
 | External inference TLS / listener not programmed | Missing `default-gateway-tls` | Script `ensure_default_gateway_tls()`; see Phase 2 |
 | No **Publish as MaaS** in GUI | Model deployed before MaaS ready | Path **C** or redeploy after `--skip-models` |
 | API key works for `/v1/models`, inference `401` | ext-proc / payload-processing on gateway | See [Phase 5 troubleshooting](docs/05-maas-models.md); open Red Hat support if persistent |
+| External inference `credentials not found in store` | Provider Secret missing `inference.llm-d.ai/ipp-managed` and/or BBR cache stale | [Phase 8 Known Issues](docs/08-external-models.md#credentials-not-found-in-store); re-run import without `--skip-validate` |
 | Phase 5 deployed unwanted model | Script auto-picked `auto` | Delete model; use `--skip-models` if GUI model already exists |
 | Duplicate OperatorGroup / failed RHOAI CSV | Script + GUI both installed operator | Single `OperatorGroup` in `redhat-ods-operator` |
 
@@ -164,6 +170,7 @@ Verification script: `manifests/06-verification/verify.sh`
 | Published Antora site | https://rh-aiservices-bu.github.io/rhoai-maas-guide/ |
 | Architecture / request flow | [docs/08-architecture.md](docs/08-architecture.md) |
 | Optional GUIs | [docs/09-optional-guis.md](docs/09-optional-guis.md) |
+| Lago billing (Phase 11) | [docs/11-lago-billing.md](docs/11-lago-billing.md) |
 | Official RHOAI 3.4 MaaS | https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index |
 | Official RHOAI 3.5 MaaS | https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/govern_llm_access_with_models-as-a-service/index |
 | Upstream MaaS project | https://opendatahub-io.github.io/models-as-a-service/latest/ |

@@ -20,8 +20,13 @@
 .Optional GUIs
 * link:{repo-url}/blob/main/docs/09-optional-guis.md[Phases 9–10: LiteMaaS and Compact MaaS]
 
+.Billing (optional)
+* link:{repo-url}/blob/main/docs/11-lago-billing.md[Phase 11: Lago billing]
+* link:{repo-url}/blob/main/docs/12-openmeter-billing.md[Phase 12: OpenMeter billing]
+
 .Reference
 * link:{repo-url}/blob/main/docs/08-architecture.md[Architecture & Request Flow]
+* link:{repo-url}/blob/main/docs/maas-namespaces.md[MaaS Namespaces Reference]
 
 .Tools
 * link:{repo-url}/blob/main/docs/claude-code.md[AI-Assisted Installation]
